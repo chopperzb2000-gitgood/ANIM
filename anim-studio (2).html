@@ -1,0 +1,1633 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Anim Studio</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/babel.min.js"></script>
+<style>html,body,#root{height:100%;margin:0;background:#09090b;font-family:"Noto Sans Thai",system-ui,sans-serif}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect } = React
+
+/* ───────── ค่าคงที่ & ยูทิลิตี้ ───────── */
+let W = 1080, H = 1920
+const PPS = 90, LABEL = 130
+const ANIM = ['x', 'y', 'scale', 'rotation', 'opacity', 'mouth']
+const bounceOut = t => { const n = 7.5625, d = 2.75; if (t < 1 / d) return n * t * t; if (t < 2 / d) return n * (t -= 1.5 / d) * t + 0.75; if (t < 2.5 / d) return n * (t -= 2.25 / d) * t + 0.9375; return n * (t -= 2.625 / d) * t + 0.984375 }
+const EASE = {
+  linear: t => t, ease: t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
+  in: t => t * t * t, out: t => 1 - Math.pow(1 - t, 3), back: t => 2.70158 * t * t * t - 1.70158 * t * t,
+  bounce: bounceOut, elastic: t => (t === 0 || t === 1 ? t : Math.pow(2, -10 * t) * Math.sin(((t * 10 - 0.75) * 2 * Math.PI) / 3) + 1), hold: () => 0,
+}
+const FONT = '"Noto Sans Thai","Sarabun",sans-serif'
+const ICON = { text: 'T', image: '▣', character: '☺', group: '▸', bone: '🦴', shape: '●', camera: '🎥' }
+const SAVE_KEY = 'anim-studio-autosave'
+const BONES = ['Hips', 'Head', 'ArmL', 'ForearmL', 'ArmR', 'ForearmR', 'LegL', 'ShinL', 'LegR', 'ShinR']
+// ท่า = ผลต่างองศาจากท่าพื้นฐานของกระดูกนั้น (ใช้ได้กับตัวละครทุกแบบที่ตั้งชื่อกระดูกตามนี้)
+const POSES = { rest: Object.fromEntries(BONES.map(b => [b, 0])), handsUp: { ArmL: 140, ArmR: -140 }, raiseR: { ArmR: -140 }, raiseL: { ArmL: 140 }, nodDown: { Head: 18 }, lean: { Hips: 8, Head: -8 } }
+const CLIPS = {
+  walk: { p: 0.8, k: [[0, { LegL: 25, LegR: -25, ShinR: 15, ShinL: 0, ArmL: -20, ArmR: 20 }], [0.5, { LegL: -25, LegR: 25, ShinL: 15, ShinR: 0, ArmL: 20, ArmR: -20 }]] },
+  wave: { p: 0.5, pre: { ArmR: -140 }, k: [[0, { ForearmR: -30 }], [0.5, { ForearmR: 30 }]] },
+  nod: { p: 0.6, k: [[0, { Head: 0 }], [0.5, { Head: 14 }]] },
+}
+const bufToB64 = b => { let r = ''; const u = new Uint8Array(b); for (let i = 0; i < u.length; i += 0x8000) r += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(r) }
+const b64ToBuf = x => Uint8Array.from(atob(x), c => c.charCodeAt(0)).buffer
+const VAJAX_URL = 'https://api.aiforthai.in.th/vajax', OPENAI_URL = 'https://api.openai.com/v1/audio/speech', OPENROUTER_URL = 'https://openrouter.ai/api/v1/audio/speech', HEYGEN_URL = 'https://api.heygen.com/v3/voices/speech'
+const EDGE_CDN = 'https://cdn.jsdelivr.net/npm/edge-tts-universal@1.3.3/dist/browser.js'
+const TTS_PRESET = { openai: { url: OPENAI_URL, model: 'tts-1', voice: 'alloy' }, openrouter: { url: OPENROUTER_URL, model: '', voice: '' }, eleven: { model: 'eleven_multilingual_v2', voice: '' }, vajax: { url: VAJAX_URL, model: '', voice: '' }, heygen: { url: HEYGEN_URL, model: '', voice: '' }, edge: { url: '/api/edge', model: '', voice: 'th-TH-PremwadeeNeural' } }
+// แปลงเสียงใดๆ → WAV 16-bit mono 24kHz (VAJAX ต้องการเสียงอ้างอิงเป็น WAV)
+async function toWav(ab) {
+  const sr = 24000, oc = new OfflineAudioContext(1, Math.max(1, Math.ceil(ab.duration * sr)), sr), s = oc.createBufferSource()
+  s.buffer = ab; s.connect(oc.destination); s.start()
+  const d = (await oc.startRendering()).getChannelData(0), out = new DataView(new ArrayBuffer(44 + d.length * 2)), w = (o, t) => [...t].forEach((c, i) => out.setUint8(o + i, c.charCodeAt(0)))
+  w(0, 'RIFF'); out.setUint32(4, 36 + d.length * 2, true); w(8, 'WAVEfmt '); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true)
+  out.setUint32(24, sr, true); out.setUint32(28, sr * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, 'data'); out.setUint32(40, d.length * 2, true)
+  for (let i = 0; i < d.length; i++) out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, d[i])) * 0x7fff, true)
+  return out.buffer
+}
+// ห่อเสียง PCM ดิบ (16-bit little-endian) ให้เป็นไฟล์ WAV เพื่อให้ decodeAudioData / บันทึกโปรเจกต์ใช้ต่อได้
+function pcmToWav(ab, rate = 24000, ch = 1) {
+  const n = ab.byteLength & ~1, o = new DataView(new ArrayBuffer(44 + n)), w = (p, t) => [...t].forEach((c, i) => o.setUint8(p + i, c.charCodeAt(0)))
+  w(0, 'RIFF'); o.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); o.setUint32(16, 16, true); o.setUint16(20, 1, true); o.setUint16(22, ch, true)
+  o.setUint32(24, rate, true); o.setUint32(28, rate * ch * 2, true); o.setUint16(32, ch * 2, true); o.setUint16(34, 16, true); w(36, 'data'); o.setUint32(40, n, true)
+  new Uint8Array(o.buffer, 44).set(new Uint8Array(ab, 0, n))
+  return o.buffer
+}
+const imgUrl = im => { if (!im.__u) { const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight; c.getContext('2d').drawImage(im, 0, 0); im.__u = c.toDataURL('image/png') } return im.__u }
+const PRESETS = [['TikTok / Reels / Shorts 9:16', 1080, 1920], ['YouTube 16:9', 1920, 1080], ['Instagram 4:5', 1080, 1350], ['Square 1:1', 1080, 1080]]
+const MEDIA = [['Kenney — สไปรต์/ตัวละคร CC0', 'https://kenney.nl/assets'], ['OpenGameArt', 'https://opengameart.org'], ['Openclipart — Public Domain', 'https://openclipart.org'],
+  ['itch.io — Free Game Assets', 'https://itch.io/game-assets/free'], ['Pixabay — ภาพ/เพลง/เสียง', 'https://pixabay.com'], ['Freesound — เอฟเฟกต์เสียง', 'https://freesound.org']]
+function EaseGraph({ k }) {
+  const f = EASE[k], pts = Array.from({ length: 41 }, (_, i) => `${((i / 40) * 60).toFixed(1)},${(40 - f(i / 40) * 30).toFixed(1)}`).join(' ')
+  return <svg width="64" height="44" viewBox="0 -4 64 48" className="bg-zinc-800 rounded shrink-0"><polyline points={pts} fill="none" stroke="#fbbf24" strokeWidth="2" /></svg>
+}
+const B = 'px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-xs disabled:opacity-40'
+const IN = 'bg-zinc-800 rounded px-2 py-1 w-full outline-none focus:ring-1 ring-sky-500'
+let uid = 1
+
+/* ───────── Sound Effect สังเคราะห์ด้วย Web Audio API (ไม่ต้องใช้ไฟล์เสียง) ───────── */
+const SFX_LIST = [['pop', 'ป๊อป'], ['click', 'คลิก'], ['ding', 'ติ๊ง'], ['coin', 'เหรียญ'], ['whoosh', 'วูช (เข้า)'], ['swoosh', 'สวิช (ออก)'], ['boom', 'ตูม'], ['hit', 'ตุบ / ชน'], ['zap', 'แฟลช / ซัพ'], ['sparkle', 'ประกาย'], ['error', 'ผิดพลาด'], ['type', 'พิมพ์ดีด'], ['jump', 'กระโดด'], ['laser', 'เลเซอร์']]
+const _noise = new WeakMap()
+const noiseBuf = a => {
+  if (!_noise.has(a)) { const b = a.createBuffer(1, a.sampleRate * 2, a.sampleRate), d = b.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; _noise.set(a, b) }
+  return _noise.get(a)
+}
+// เล่นเอฟเฟกต์ name ที่เวลา t (เวลาของ AudioContext) ผ่านโหนด out · คืนรายการโหนดต้นเสียง (ไว้สั่ง stop)
+function playSfx(a, out, name, t, vol = 1) {
+  const nodes = [], pk = p => Math.max(0.0001, p * vol)
+  const osc = (type, f0, f1, t0, dur, peak) => {
+    const o = a.createOscillator(), g = a.createGain()
+    o.type = type; o.frequency.setValueAtTime(f0, t0)
+    if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t0 + dur)
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(pk(peak), t0 + Math.min(0.012, dur / 3)); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+    o.connect(g); g.connect(out); o.start(t0); o.stop(t0 + dur + 0.05); nodes.push(o)
+  }
+  const noise = (type, f0, f1, t0, dur, peak, q = 1) => {
+    const s = a.createBufferSource(), fl = a.createBiquadFilter(), g = a.createGain()
+    s.buffer = noiseBuf(a); s.loop = true; fl.type = type; fl.Q.value = q
+    fl.frequency.setValueAtTime(f0, t0); fl.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t0 + dur)
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(pk(peak), t0 + dur * 0.35); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+    s.connect(fl); fl.connect(g); g.connect(out); s.start(t0); s.stop(t0 + dur + 0.05); nodes.push(s)
+  }
+  switch (name) {
+    case 'pop': osc('sine', 650, 140, t, 0.12, 0.9); break
+    case 'click': osc('square', 1800, 900, t, 0.035, 0.35); noise('highpass', 3000, 6000, t, 0.03, 0.3); break
+    case 'ding': osc('sine', 1320, 1320, t, 0.9, 0.5); osc('sine', 1980, 1980, t, 0.6, 0.22); osc('sine', 2640, 2640, t, 0.3, 0.1); break
+    case 'coin': osc('square', 988, 988, t, 0.08, 0.22); osc('square', 1319, 1319, t + 0.08, 0.45, 0.22); break
+    case 'whoosh': noise('bandpass', 250, 3000, t, 0.55, 0.9, 0.9); break
+    case 'swoosh': noise('bandpass', 3000, 250, t, 0.4, 0.9, 0.9); break
+    case 'boom': osc('sine', 130, 32, t, 0.9, 1); noise('lowpass', 500, 40, t, 0.7, 0.9); break
+    case 'hit': osc('triangle', 240, 55, t, 0.2, 0.9); noise('lowpass', 3500, 200, t, 0.13, 0.6); break
+    case 'zap': osc('sawtooth', 1600, 90, t, 0.28, 0.3); noise('highpass', 3500, 9000, t, 0.22, 0.35); break
+    case 'sparkle': for (let i = 0; i < 6; i++) osc('sine', 1500 + i * 310, 1500 + i * 310, t + i * 0.055, 0.28, 0.18); break
+    case 'error': osc('square', 220, 200, t, 0.16, 0.28); osc('square', 160, 140, t + 0.2, 0.26, 0.28); break
+    case 'type': osc('square', 1300 + Math.random() * 400, 700, t, 0.03, 0.22); break
+    case 'jump': osc('square', 240, 720, t, 0.2, 0.28); break
+    case 'laser': osc('sawtooth', 1900, 180, t, 0.28, 0.28); break
+  }
+  return nodes
+}
+// เสียงพูดของ Google ในเบราว์เซอร์ (Web Speech API) — เลือกเสียง Google ภาษาไทยก่อน ถ้าไม่มีใช้เสียงไทยอื่น
+const googleTh = vs => vs.find(v => /google/i.test(v.name) && /^th/i.test(v.lang)) || vs.find(v => /^th/i.test(v.lang))
+
+const mk = (type, name, props = {}) => ({
+  id: 'L' + uid++, type, name, parent: null, visible: true, locked: false, keys: {},
+  props: { x: W / 2, y: H / 2, scale: 1, rotation: 0, opacity: 1, mouth: 0, text: 'ข้อความ', color: '#ffffff', size: 90, ...props },
+})
+
+// ค่า ณ เวลา t (Interpolation ระหว่าง Keyframe แบบ Linear / Ease)
+function val(l, p, t) {
+  const k = l.keys[p]
+  if (!k || !k.length) return l.props[p]
+  if (t <= k[0].t) return k[0].v
+  const last = k[k.length - 1]
+  if (t >= last.t) return last.v
+  for (let i = 0; i < k.length - 1; i++) {
+    const a = k[i], b = k[i + 1]
+    if (t >= a.t && t <= b.t) return a.v + (b.v - a.v) * (EASE[a.ease] || EASE.linear)((t - a.t) / (b.t - a.t))
+  }
+  return last.v
+}
+
+function putKey(arr = [], t, v, ease, s) {
+  const old = arr.find(k => Math.abs(k.t - t) < 1e-3)
+  const a = arr.filter(k => Math.abs(k.t - t) >= 1e-3)
+  a.push({ t, v, ease: ease ?? old?.ease ?? 'linear', s })
+  return a.sort((x, y) => x.t - y.t)
+}
+
+// ถ้ามี Keyframe อยู่แล้ว → แก้แล้วบันทึก Key ที่เวลา t (auto-key) ไม่งั้นแก้ค่าพื้นฐาน
+const setProp = (l, p, v, t, ease) =>
+  l.keys[p]?.length ? { ...l, keys: { ...l.keys, [p]: putKey(l.keys[p], t, v, ease) } } : { ...l, props: { ...l.props, [p]: v } }
+
+function flatten(layers) {
+  const out = []
+  const walk = (pid, d) => layers.filter(l => l.parent === pid).forEach(l => { out.push({ l, d }); walk(l.id, d + 1) })
+  walk(null, 0)
+  return out
+}
+
+// เมทริกซ์โลกของแต่ละเลเยอร์ (รองรับ Parent-Child)
+function camMatrix(layers, t) {
+  const c = layers.find(l => l.type === 'camera')
+  if (!c) return new DOMMatrix()
+  return new DOMMatrix().translate(W / 2, H / 2).rotate(-val(c, 'rotation', t)).scale(Math.max(0.05, val(c, 'scale', t))).translate(-val(c, 'x', t), -val(c, 'y', t))
+}
+function computeWorld(layers, t) {
+  const map = new Map(), byId = new Map(layers.map(l => [l.id, l])), cam = camMatrix(layers, t)
+  const get = l => {
+    if (map.has(l.id)) return map.get(l.id)
+    const par = l.parent && byId.get(l.parent)
+    const pw = par ? get(par) : { m: cam, a: 1 }
+    const m = pw.m.multiply(new DOMMatrix().translate(val(l, 'x', t), val(l, 'y', t)).rotate(val(l, 'rotation', t)).scale(val(l, 'scale', t)).translate(-(l.props.px || 0), -(l.props.py || 0)))
+    const r = { m, a: pw.a * val(l, 'opacity', t) }
+    map.set(l.id, r)
+    return r
+  }
+  layers.forEach(get)
+  return map
+}
+
+function bounds(ctx, l, imgs) {
+  if (l.type === 'text') {
+    ctx.font = `700 ${l.props.size}px ${FONT}`
+    const ls = (l.props.text || ' ').split('\n'), w = Math.max(40, ...ls.map(x => ctx.measureText(x || ' ').width)), h = l.props.size * 1.25 * ls.length
+    return { x: -w / 2, y: -h / 2, w, h }
+  }
+  if (l.type === 'image') {
+    const i = imgs.get(l.id), ok = i && i.naturalWidth
+    const k = ok ? 700 / Math.max(i.naturalWidth, i.naturalHeight) : 1
+    const w = ok ? i.naturalWidth * k : 400, h = ok ? i.naturalHeight * k : 400
+    return { x: -w / 2, y: -h / 2, w, h }
+  }
+  if (l.type === 'character') return { x: -150, y: -320, w: 300, h: 570 }
+  if (l.type === 'bone') return { x: 0, y: -16, w: l.props.len, h: 32 }
+  if (l.type === 'shape') return { x: -l.props.w / 2, y: -l.props.h / 2, w: l.props.w, h: l.props.h }
+  return null
+}
+
+// ค่า static ที่ edit() สั่งเปลี่ยน ณ เวลาหนึ่ง (เช่น ข้อความ/สี) เก็บเป็นรายการ props.ch
+function withChanges(l, t) {
+  const ch = l.props.ch
+  if (!ch) return l
+  const p = { ...l.props }
+  for (const e of ch) if (t >= e.t) Object.assign(p, e.p)
+  return { ...l, props: p }
+}
+function drawLayer(ctx, l, w, t, imgs) {
+  l = withChanges(l, t)
+  if (l.type === 'bone') return
+  const b = bounds(ctx, l, imgs)
+  if (!b) return
+  ctx.setTransform(w.m)
+  ctx.globalAlpha = Math.max(0, Math.min(1, w.a))
+  if (l.type === 'text') {
+    ctx.font = `700 ${l.props.size}px ${FONT}`
+    ctx.fillStyle = l.props.color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    const ls = (l.props.text || '').split('\n'), lh = l.props.size * 1.25
+    const an = l.props.anim, u = an && an !== 'none' ? Math.max(0, Math.min(1, (t - (l.props.animAt || 0)) / (l.props.animDur || 0.8))) : 1
+    if (an === 'pop') { const k = EASE.elastic(u); ctx.scale(k, k) }
+    if (an === 'slide') ctx.translate(-(1 - EASE.out(u)) * W * 0.6, 0)
+    if (an === 'fade' || an === 'slide' || an === 'pop') ctx.globalAlpha *= Math.min(1, u * 3)
+    let rem = an === 'typewriter' ? Math.ceil([...(l.props.text || '')].length * u) : Infinity
+    ls.forEach((x, i) => {
+      const y = (i - (ls.length - 1) / 2) * lh, ch = [...x]
+      if (an === 'typewriter') { ctx.textAlign = 'left'; ctx.fillText(ch.slice(0, Math.max(0, rem)).join(''), -ctx.measureText(x).width / 2, y); rem -= ch.length + 1 }
+      else ctx.fillText(x, 0, y)
+    })
+  } else if (l.type === 'image') {
+    const i = imgs.get(l.id)
+    if (i && i.naturalWidth) ctx.drawImage(i, b.x, b.y, b.w, b.h)
+    else { ctx.fillStyle = '#334155'; ctx.fillRect(b.x, b.y, b.w, b.h) }
+  } else if (l.type === 'shape') {
+    ctx.fillStyle = l.props.color; ctx.beginPath()
+    if (l.props.kind === 'circle') ctx.ellipse(0, 0, b.w / 2, b.h / 2, 0, 0, 7)
+    else ctx.roundRect(b.x, b.y, b.w, b.h, Math.min(b.w, b.h) / 3)
+    ctx.fill()
+  } else {
+    const m = val(l, 'mouth', t)
+    const line = (a, b2, c, d) => { ctx.beginPath(); ctx.moveTo(a, b2); ctx.lineTo(c, d); ctx.stroke() }
+    ctx.lineCap = 'round'
+    ctx.strokeStyle = '#ffd3a8'; ctx.lineWidth = 26; line(-75, -40, -130, 70); line(75, -40, 130, 70)
+    ctx.strokeStyle = '#4338ca'; ctx.lineWidth = 40; line(-35, 150, -35, 230); line(35, 150, 35, 230)
+    ctx.fillStyle = '#6366f1'; ctx.beginPath(); ctx.roundRect(-85, -95, 170, 250, 40); ctx.fill()
+    ctx.fillStyle = '#ffd3a8'; ctx.beginPath(); ctx.arc(0, -190, 100, 0, 7); ctx.fill()
+    ctx.fillStyle = '#292524'; ctx.beginPath(); ctx.arc(0, -215, 104, Math.PI, 0); ctx.fill()
+    ctx.fillStyle = '#1f2937'
+    ;[-35, 35].forEach(x => { ctx.beginPath(); ctx.arc(x, -185, 10, 0, 7); ctx.fill() })
+    ctx.fillStyle = '#7f1d1d'; ctx.beginPath(); ctx.ellipse(0, -145, 28, 4 + m * 26, 0, 0, 7); ctx.fill()
+  }
+}
+
+function drawSub(ctx, text, st = 'box') {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1
+  const fs = Math.round(Math.min(W, H) * 0.054)
+  ctx.font = `700 ${fs}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  const lines = []; let cur = ''
+  for (const ch of text) { if (ctx.measureText(cur + ch).width > W * 0.82) { lines.push(cur); cur = ch } else cur += ch }
+  lines.push(cur)
+  const lh = fs * 1.35, bh = lines.length * lh + fs * 0.5, y0 = H * 0.82 - bh
+  if (st === 'box') { ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.beginPath(); ctx.roundRect(W * 0.06, y0, W * 0.88, bh, fs * 0.4); ctx.fill() }
+  lines.forEach((x, i) => {
+    const y = y0 + fs * 0.25 + lh * (i + 0.5)
+    if (st === 'outline' || st === 'tiktok') { ctx.lineJoin = 'round'; ctx.lineWidth = fs * 0.28; ctx.strokeStyle = '#000'; ctx.strokeText(x, W / 2, y) }
+    if (st === 'neon') { ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = fs * 0.6 }
+    ctx.fillStyle = st === 'tiktok' ? '#fde047' : st === 'neon' ? '#a5f3fc' : '#fff'; ctx.fillText(x, W / 2, y); ctx.shadowBlur = 0
+  })
+}
+
+function drawGizmo(ctx, w, b, vs) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1
+  const pts = [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]].map(([x, y]) => w.m.transformPoint(new DOMPoint(x, y)))
+  const rp = w.m.transformPoint(new DOMPoint(b.x + b.w / 2, b.y - 70)), tp = w.m.transformPoint(new DOMPoint(b.x + b.w / 2, b.y))
+  ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 3 / vs; ctx.beginPath()
+  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath()
+  ctx.moveTo(tp.x, tp.y); ctx.lineTo(rp.x, rp.y); ctx.stroke()
+  const hs = 14 / vs
+  ctx.fillStyle = '#fff'
+  pts.forEach(p => ctx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs))
+  ctx.fillStyle = '#38bdf8'; ctx.beginPath(); ctx.arc(rp.x, rp.y, hs / 1.6, 0, 7); ctx.fill()
+}
+
+/* ───────── ระบบสคริปต์: แปลงคำสั่งเป็น Keyframe ───────── */
+// กระดูกชี้ไปทางแกน +X ของตัวเอง, จุดหมุน (Pivot) = ข้อต่อที่ (0,0)
+function drawBones(ctx, layers, world, sel) {
+  ctx.globalAlpha = 1
+  layers.forEach(l => {
+    if (l.type !== 'bone' || !l.visible) return
+    const len = l.props.len, w = Math.min(Math.max(len * 0.12, 8), 26), on = l.id === sel
+    ctx.setTransform(world.get(l.id).m)
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(len * 0.18, -w); ctx.lineTo(len, 0); ctx.lineTo(len * 0.18, w); ctx.closePath()
+    ctx.fillStyle = on ? 'rgba(251,191,36,.45)' : 'rgba(56,189,248,.35)'
+    ctx.strokeStyle = on ? '#fbbf24' : '#38bdf8'; ctx.lineWidth = 3
+    ctx.fill(); ctx.stroke()
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(0, 0, 9, 0, 7); ctx.fill()
+  })
+}
+
+function rig() {
+  const bone = (name, par, x, y, rotation, len) => ({ ...mk('bone', name, { x, y, rotation, len }), parent: par ? par.id : null })
+  const shape = (name, par, x, y, o) => ({ ...mk('shape', name, { x, y, ...o }), parent: par.id })
+  const skin = '#ffd3a8'
+  const hips = bone('Hips', null, 540, 1180, -90, 250), head = bone('Head', hips, 250, 0, 0, 150)
+  const armL = bone('ArmL', hips, 225, -105, 200, 150), foreL = bone('ForearmL', armL, 150, 0, 0, 140)
+  const armR = bone('ArmR', hips, 225, 105, 160, 150), foreR = bone('ForearmR', armR, 150, 0, 0, 140)
+  const arm = (n, b, len) => [shape(n + '_img', b, len / 2, 0, { w: len, h: 44, color: skin, kind: 'rrect' })]
+  return [
+    hips, shape('Torso', hips, 125, 0, { w: 250, h: 190, color: '#6366f1', kind: 'rrect' }),
+    head, shape('Face', head, 95, 0, { w: 200, h: 200, color: skin, kind: 'circle' }),
+    shape('EyeL', head, 120, -40, { w: 24, h: 24, color: '#1f2937', kind: 'circle' }),
+    shape('EyeR', head, 120, 40, { w: 24, h: 24, color: '#1f2937', kind: 'circle' }),
+    shape('Mouth', head, 55, 0, { w: 14, h: 60, color: '#7f1d1d', kind: 'rrect' }),
+    armL, ...arm('ArmL', armL, 150), foreL, ...arm('ForearmL', foreL, 140), shape('HandL', foreL, 140, 0, { w: 56, h: 56, color: skin, kind: 'circle' }),
+    armR, ...arm('ArmR', armR, 150), foreR, ...arm('ForearmR', foreR, 140), shape('HandR', foreR, 140, 0, { w: 56, h: 56, color: skin, kind: 'circle' }),
+  ]
+}
+
+const CHARS = [
+  ['person', 'คนแยกส่วน', 'หัว ลำตัว แขน 2 ท่อน + กระดูก', 'แยกส่วน (มีกระดูก)'],
+  ['stick', 'หุ่นไม้ขีด', 'แขน-ขา 2 ท่อน + กระดูก', ''],
+  ['robot', 'หุ่นยนต์แยกส่วน', 'แขน ขา หัว เสาอากาศ + กระดูก', ''],
+  ['character', 'คนชิ้นเดียว', 'วาดในตัว ปากขยับ ไม่มีกระดูก', 'ติดกัน (ชิ้นเดียว)'],
+  ['blob', 'บลอบ (ก้อนผี)', 'กลุ่มรูปทรง ลากทั้งตัว', ''],
+  ['bot', 'หุ่นยนต์ติดกัน', 'กลุ่มรูปทรง ลากทั้งตัว', ''],
+]
+
+// สร้างตัวละครสำเร็จรูป: แยกส่วน = กระดูก + รูปทรงที่ผูกไว้ / ติดกัน = กลุ่ม (Group) ของรูปทรง
+function makeChar(kind, cx, cy, taken) {
+  let out = []
+  const B = (name, par, x, y, rotation, len) => { const n = { ...mk('bone', name, { x, y, rotation, len }), parent: par ? par.id : null }; out.push(n); return n }
+  const G = (name, x, y) => { const n = mk('group', name, { x, y }); out.push(n); return n }
+  const S = (name, par, x, y, w, h, color, k = 'rrect') => { out.push({ ...mk('shape', name, { x, y, w, h, color, kind: k }), parent: par.id }) }
+  const limb = (up, lo, par, x, y, rot, l1, l2, th, col, end) => {
+    const a = B(up, par, x, y, rot, l1); S(up + '_img', a, l1 / 2, 0, l1, th, col)
+    const f = B(lo, a, l1, 0, 0, l2); S(lo + '_img', f, l2 / 2, 0, l2, th, col)
+    if (end) S(lo + '_end', f, l2, 0, end[0], end[1], end[2], end[3])
+  }
+  if (kind === 'person') { out = rig(); out[0].props.x = cx; out[0].props.y = cy }
+  else if (kind === 'stick') {
+    const c = '#e5e7eb', hips = B('Hips', null, cx, cy, -90, 200); S('Spine', hips, 100, 0, 200, 16, c)
+    const head = B('Head', hips, 200, 0, 0, 100); S('Face', head, 55, 0, 110, 110, c, 'circle')
+    S('EyeL', head, 70, -22, 14, 14, '#111827', 'circle'); S('EyeR', head, 70, 22, 14, 14, '#111827', 'circle'); S('Mouth', head, 38, 0, 8, 36, '#111827')
+    limb('ArmL', 'ForearmL', hips, 180, 0, 205, 110, 100, 16, c); limb('ArmR', 'ForearmR', hips, 180, 0, 155, 110, 100, 16, c)
+    limb('LegL', 'ShinL', hips, 0, 0, 190, 120, 120, 18, c); limb('LegR', 'ShinR', hips, 0, 0, 170, 120, 120, 18, c)
+  } else if (kind === 'robot') {
+    const hips = B('Hips', null, cx, cy, -90, 220); S('Torso', hips, 110, 0, 220, 200, '#94a3b8'); S('Core', hips, 110, 0, 60, 60, '#22d3ee', 'circle')
+    const head = B('Head', hips, 220, 0, 0, 140); S('Face', head, 75, 0, 140, 160, '#cbd5e1')
+    S('EyeL', head, 95, -40, 32, 32, '#22d3ee', 'circle'); S('EyeR', head, 95, 40, 32, 32, '#22d3ee', 'circle'); S('Mouth', head, 40, 0, 12, 80, '#0f172a')
+    S('Antenna', head, 165, 0, 40, 10, '#64748b'); S('AntennaTip', head, 190, 0, 26, 26, '#ef4444', 'circle')
+    const hand = [56, 56, '#f59e0b', 'rrect'], foot = [64, 64, '#334155', 'circle']
+    limb('ArmL', 'ForearmL', hips, 200, -125, 200, 130, 120, 44, '#64748b', hand); limb('ArmR', 'ForearmR', hips, 200, 125, 160, 130, 120, 44, '#64748b', hand)
+    limb('LegL', 'ShinL', hips, 0, -60, 185, 130, 130, 50, '#475569', foot); limb('LegR', 'ShinR', hips, 0, 60, 175, 130, 130, 50, '#475569', foot)
+  } else if (kind === 'blob') {
+    const g = G('Blob', cx, cy - 200)
+    S('EarL', g, -130, -150, 70, 70, '#8b5cf6', 'circle'); S('EarR', g, 130, -150, 70, 70, '#8b5cf6', 'circle')
+    S('Body', g, 0, 0, 380, 340, '#a78bfa', 'circle'); S('Belly', g, 0, 60, 240, 190, '#ddd6fe', 'circle')
+    S('EyeL', g, -70, -50, 80, 80, '#fff', 'circle'); S('EyeR', g, 70, -50, 80, 80, '#fff', 'circle')
+    S('PupilL', g, -64, -46, 34, 34, '#111827', 'circle'); S('PupilR', g, 76, -46, 34, 34, '#111827', 'circle'); S('Mouth', g, 0, 40, 120, 26, '#4c1d95')
+  } else if (kind === 'bot') {
+    const g = G('Bot', cx, cy - 200)
+    S('LegL', g, -60, 230, 60, 120, '#475569'); S('LegR', g, 60, 230, 60, 120, '#475569'); S('ArmL', g, -150, 30, 50, 170, '#64748b'); S('ArmR', g, 150, 30, 50, 170, '#64748b')
+    S('Body', g, 0, 50, 220, 260, '#94a3b8'); S('Core', g, 0, 60, 60, 60, '#22d3ee', 'circle'); S('Head', g, 0, -140, 200, 150, '#cbd5e1')
+    S('EyeL', g, -45, -145, 36, 36, '#22d3ee', 'circle'); S('EyeR', g, 45, -145, 36, 36, '#22d3ee', 'circle'); S('Mouth', g, 0, -95, 90, 14, '#0f172a')
+    S('Antenna', g, 0, -240, 8, 45, '#64748b'); S('AntennaTip', g, 0, -268, 26, 26, '#ef4444', 'circle')
+  }
+  let k = 1  // ชื่อซ้ำกับของเดิมในฉาก → ต่อท้าย _2, _3 ... ให้ทั้งตัว
+  while (out.some(n => taken.has(n.name + (k > 1 ? '_' + k : '')))) k++
+  if (k > 1) out.forEach(n => { n.name += '_' + k })
+  return out
+}
+
+function runScript(code, layers0, dur0) {
+  let layers = layers0.filter(l => !l.gen).map(l => ({ ...l, props: l.props.ch ? { ...l.props, ch: undefined } : l.props, keys: Object.fromEntries(Object.entries(l.keys).map(([p, a]) => [p, a.filter(k => !k.s)])) }))
+  layers.forEach(l => { if (l.parent && !layers.some(x => x.id === l.parent)) l.parent = null })
+  const subs = [], trans = [], sounds = [], sfxEv = []
+  let cur = 0, end = 0
+  const find = n => { const l = layers.find(x => x.name === n); if (!l) throw new Error(`ไม่พบเลเยอร์ชื่อ "${n}"`); return l }
+  const put = (l, p, t, v, ease) => { l.keys[p] = putKey(l.keys[p], t, v, ease, true); end = Math.max(end, t) }
+  const api = {
+    animate: (name, o = {}) => {
+      const l = find(name), d = o.duration ?? 1, st = cur + (o.delay || 0), ease = o.ease || 'ease'
+      for (const p of ANIM) if (o[p] !== undefined) { if (d > 0) put(l, p, st, val(l, p, st), ease); put(l, p, st + d, o[p], 'linear') }
+    },
+    speak: (text, d, name, voice) => {
+      d = d ?? Math.max(1, text.length * 0.09)
+      subs.push({ start: cur, end: cur + d, text, who: name, voice })
+      let c = (name && find(name)) || layers.find(x => x.type === 'character' && x.name === 'Character') || layers.find(x => x.type === 'character')
+      if (!c) c = layers.find(x => x.name === 'Mouth')
+      const pr = c && c.type !== 'character' ? 'scale' : 'mouth', f = v => (pr === 'mouth' ? v : 0.4 + v * 0.9)
+      if (c) {
+        const pat = [1, 0.2, 0.8, 0.1, 0.9, 0.3]
+        put(c, pr, cur, f(0), 'linear')
+        for (let t = cur + 0.1, i = 0; t < cur + d - 0.1; t += 0.14, i++) put(c, pr, t, f(pat[i % 6]), 'linear')
+        put(c, pr, cur + d, f(0), 'linear')
+      }
+      cur += d; end = Math.max(end, cur)
+    },
+    wait: s => { cur += s },
+    at: s => { cur = s },
+    // หมุนกระดูกไปที่มุม (องศา, สัมพันธ์กับกระดูกแม่) ภายใน duration วินาที
+    rotateBone: (name, angle, d = 0.5, ease) => api.animate(name, { rotation: angle, duration: d, ease }),
+    // IK 2 ข้อต่อ: ให้ปลายกระดูก name ไปถึง (x,y) บนแคนวาส โดยหมุนกระดูก name และกระดูกแม่
+    ikTarget: (name, x, y, d = 0.5, bend = 1) => {
+      const B = find(name), A = layers.find(l => l.id === B.parent)
+      if (!A || A.type !== 'bone') throw new Error(`"${name}" ต้องมีกระดูกแม่เพื่อทำ IK`)
+      const w = computeWorld(layers, cur), mA = w.get(A.id).m, mB = w.get(B.id).m, S = mA.transformPoint(new DOMPoint(0, 0))
+      const l1 = A.props.len * Math.hypot(mA.a, mA.b), l2 = B.props.len * Math.hypot(mB.a, mB.b)
+      const dx = x - S.x, dy = y - S.y
+      const dist = Math.min(Math.max(Math.hypot(dx, dy), Math.abs(l1 - l2) + 1e-3), l1 + l2 - 1e-3)
+      const phi = Math.atan2(dy, dx), al = Math.acos((l1 * l1 + dist * dist - l2 * l2) / (2 * l1 * dist))
+      const be = Math.acos((l1 * l1 + l2 * l2 - dist * dist) / (2 * l1 * l2))
+      const a = phi + bend * al, b = a - bend * (Math.PI - be), deg = r => (r * 180) / Math.PI
+      const pm = A.parent ? w.get(A.parent).m : camMatrix(layers, cur)
+      const wrap = (v, ref) => v - 360 * Math.round((v - ref) / 360)
+      const ra = deg(a) - deg(Math.atan2(pm.b, pm.a)), rb = deg(b - a)
+      api.rotateBone(A.name, wrap(ra, val(A, 'rotation', cur)), d)
+      api.rotateBone(B.name, wrap(rb, val(B, 'rotation', cur)), d)
+    },
+  }
+  const poseTo = (deltas, d, sfx) => Object.entries(deltas).forEach(([b, dl]) => {
+    const n = layers.find(x => x.type === 'bone' && x.name === b + sfx)
+    if (n) api.animate(n.name, { rotation: n.props.rotation + dl, duration: d })
+  })
+  Object.assign(api, {
+    camera: (o = {}) => api.animate('Camera', { x: o.x, y: o.y, scale: o.zoom, rotation: o.rotation, duration: o.duration, delay: o.delay, ease: o.ease }),
+    shake: (amp = 20, d = 0.4) => {
+      sfxEv.push({ name: 'boom', at: cur, vol: Math.min(1, 0.4 + amp / 60), auto: true, gen: true })
+      const c = find('Camera'), bx = val(c, 'x', cur), by = val(c, 'y', cur)
+      put(c, 'x', cur, bx, 'linear'); put(c, 'y', cur, by, 'linear')
+      for (let i = 1; i * 0.04 < d; i++) { const k = 1 - (i * 0.04) / d; put(c, 'x', cur + i * 0.04, bx + Math.sin(i * 12.9) * amp * k, 'linear'); put(c, 'y', cur + i * 0.04, by + Math.cos(i * 7.7) * amp * k, 'linear') }
+      put(c, 'x', cur + d, bx, 'linear'); put(c, 'y', cur + d, by, 'linear')
+    },
+    pose: (name, d = 0.5, sfx = '') => { if (!POSES[name]) throw new Error(`ไม่มีท่า "${name}" (มี: ${Object.keys(POSES).join(', ')})`); poseTo(POSES[name], d, sfx) },
+    play: (name, secs = 2, sfx = '') => {
+      const c = CLIPS[name]
+      if (!c) throw new Error(`ไม่มีคลิป "${name}" (มี: ${Object.keys(CLIPS).join(', ')})`)
+      const st = cur, step = c.p / c.k.length, t0 = st + (c.pre ? 0.3 : 0)
+      if (c.pre) poseTo(c.pre, 0.3, sfx)
+      for (let i = 0; t0 + i * c.p < st + secs - 0.01; i++) c.k.forEach(([ph, dl]) => { cur = t0 + i * c.p + ph * c.p; poseTo(dl, step, sfx) })
+      const bs = new Set([...Object.keys(c.pre || {}), ...c.k.flatMap(([, dl]) => Object.keys(dl))])
+      cur = st + secs; poseTo(Object.fromEntries([...bs].map(b => [b, 0])), 0.25, sfx); cur = st + secs
+    },
+    textAnim: (name, type = 'typewriter', d = 0.8) => {
+      const l = find(name); l.props = { ...l.props, anim: type, animDur: d, animAt: cur }
+      if (type === 'typewriter') sfxEv.push({ name: 'type', at: cur, vol: 0.5, rep: Math.max(1, Math.floor(d / 0.06)), gap: 0.06, auto: true, gen: true })
+      else if (type === 'pop') sfxEv.push({ name: 'pop', at: cur, vol: 0.7, auto: true, gen: true })
+      else if (type === 'slide') sfxEv.push({ name: 'swoosh', at: cur, vol: 0.5, auto: true, gen: true })
+    },
+    transition: (type = 'fade', d = 0.6) => {
+      trans.push({ type, start: cur, dur: d }); end = Math.max(end, cur + d)
+      sfxEv.push({ name: type === 'wipe' ? 'whoosh' : type === 'flash' ? 'zap' : 'swoosh', at: cur, vol: 0.6, auto: true, gen: true })
+    },
+    sound: (name, o = {}) => { sounds.push({ name, at: cur, ...o }) },
+    // sfx('pop', { volume, delay, rep, gap }) → เอฟเฟกต์เสียงสังเคราะห์ (Web Audio) ที่เวลาปัจจุบัน
+    sfx: (name, o = {}) => {
+      if (!SFX_LIST.some(x => x[0] === name)) throw new Error(`ไม่มีเอฟเฟกต์เสียง "${name}" (มี: ${SFX_LIST.map(x => x[0]).join(', ')})`)
+      sfxEv.push({ name, at: cur + (o.delay || 0), vol: o.volume ?? 1, rep: o.rep, gap: o.gap, gen: true })
+    },
+    // make(ชนิด, ชื่อ, props): สร้างเลเยอร์ใหม่ที่เวลาปัจจุบัน (สร้างใหม่ทุกครั้งที่ Run ไม่ซ้ำซ้อน)
+    make: (type, name, o = {}) => {
+      if (layers.some(x => x.name === name)) throw new Error(`มีเลเยอร์ชื่อ "${name}" อยู่แล้ว`)
+      const base = { circle: ['shape', { w: 200, h: 200, color: '#f472b6', kind: 'circle' }], rect: ['shape', { w: 300, h: 200, color: '#38bdf8', kind: 'rrect' }], text: ['text', {}], group: ['group', {}], character: ['character', {}] }[type]
+      if (!base) throw new Error(`make: ไม่รู้จักชนิด "${type}" (ใช้ได้: text, circle, rect, group, character)`)
+      const { parent, ...rest } = o
+      const l = { ...mk(base[0], name, { ...base[1], ...rest }), gen: true, parent: parent ? find(parent).id : null }
+      layers.push(l)
+      if (cur > 0) { put(l, 'opacity', 0, 0, 'hold'); put(l, 'opacity', cur, rest.opacity ?? 1, 'hold') }
+    },
+    // remove(ชื่อ): ซ่อนตั้งแต่เวลาปัจจุบัน (ลูกหายตามด้วย) · remove(ชื่อ, { delete: true }): ลบออกจากโปรเจกต์ถาวร
+    remove: (name, o = {}) => {
+      if (o.delete) {
+        const ids = new Set(), l0 = layers.find(x => x.name === name), walk = id => { ids.add(id); layers.filter(x => x.parent === id).forEach(x => walk(x.id)) }
+        if (l0) walk(l0.id)
+        layers = layers.filter(x => !ids.has(x.id)); return
+      }
+      const l = find(name)
+      put(l, 'opacity', cur, val(l, 'opacity', cur), 'hold'); put(l, 'opacity', cur + 0.001, 0, 'hold')
+    },
+    // edit(ชื่อ, props): x,y,scale,rotation,opacity เปลี่ยนที่เวลาปัจจุบัน (ใส่ duration ให้นุ่มนวลได้) · text,color,size,w,h,kind,anim,animDur,animAt เปลี่ยนตั้งแต่เวลาปัจจุบัน
+    edit: (name, o = {}) => {
+      const l = find(name), anim = {}, stat = {}, KEY = ['x', 'y', 'scale', 'rotation', 'opacity'], ST = ['text', 'color', 'size', 'w', 'h', 'kind', 'anim', 'animDur', 'animAt']
+      Object.entries(o).forEach(([k, v]) => {
+        if (['duration', 'delay', 'ease'].includes(k)) return
+        if (KEY.includes(k)) anim[k] = v
+        else if (ST.includes(k)) stat[k] = v
+        else throw new Error(`edit: ไม่รู้จัก "${k}" (ใช้ได้: ${[...KEY, ...ST].join(', ')})`)
+      })
+      if (Object.keys(anim).length) api.animate(name, { ...anim, duration: Math.max(o.duration ?? 0, 0.001), delay: o.delay, ease: o.ease })
+      if (Object.keys(stat).length) l.props = cur <= 0 ? { ...l.props, ...stat } : { ...l.props, ch: [...(l.props.ch || []), { t: cur, p: stat }].sort((a, b) => a.t - b.t) }
+    },
+  })
+  new Function('animate', 'speak', 'wait', 'at', 'rotateBone', 'ikTarget', 'camera', 'shake', 'pose', 'play', 'textAnim', 'transition', 'sound', 'sfx', 'make', 'remove', 'edit', code)(
+    api.animate, api.speak, api.wait, api.at, api.rotateBone, api.ikTarget, api.camera, api.shake, api.pose, api.play, api.textAnim, api.transition, api.sound, api.sfx, api.make, api.remove, api.edit)
+  return { layers, subs, trans, sounds, sfx: sfxEv, duration: Math.max(dur0, Math.ceil((end + 0.5) * 10) / 10) }
+}
+
+const DEFAULT_SCRIPT = `// คำสั่งที่ใช้ได้
+//   at(วินาที) / wait(วินาที)  → ย้าย/เลื่อนเวลาปัจจุบันของสคริปต์
+//   animate('ชื่อเลเยอร์', { x, y, scale, rotation, opacity, duration, delay, ease: 'linear' | 'ease' })
+//   rotateBone('ชื่อกระดูก', มุมองศา, ระยะเวลา)  → หมุนข้อต่อ (มุมสัมพันธ์กับกระดูกแม่)
+//   ikTarget('ชื่อกระดูก', x, y, ระยะเวลา)      → ให้ปลายกระดูกเอื้อมไปที่พิกัด (x,y) บนแคนวาส
+//   speak('ข้อความ', ระยะเวลา)  → ซับไตเติล + ปากขยับ (เวลาเดินหน้าตามระยะเวลา)
+//   camera({ x, y, zoom, rotation, duration }) · shake(แรง, วินาที)  → กล้อง (เลเยอร์ Camera)
+//   pose('handsUp' | 'raiseR' | 'nodDown' | 'rest', วินาที[, '_2'])   → ท่าสำเร็จรูป (ไม่เดินเวลา)
+//   play('walk' | 'wave' | 'nod', วินาที[, '_2'])                    → คลิปวนซ้ำ (เดินเวลา)
+//   textAnim('Title', 'typewriter' | 'pop' | 'slide' | 'fade', วินาที) · transition('fade' | 'wipe' | 'flash', วินาที)
+//   sound('ชื่อไฟล์เสียง', { volume, fadeIn, fadeOut, loop })  → วางเสียง/เพลงที่นำเข้าไว้ที่เวลาปัจจุบันของสคริปต์
+//   sfx('pop' | 'ding' | 'whoosh' | 'boom' | 'hit' | 'zap' | 'coin' | 'sparkle' | 'click' | 'type' | 'jump' | 'laser' | 'error', { volume, delay, rep, gap })  → เอฟเฟกต์เสียง (Web Audio) · transition / shake / textAnim มีเสียงอัตโนมัติ
+//   speak('ข้อความ', วินาที, 'Mouth_2', 'voiceId')  → ระบุปากของผู้พูด และเสียง TTS API เฉพาะตัว (VAJAX: ใส่ชื่อเสียงอ้างอิงที่เพิ่มไว้ เช่น 'พี่หมี')
+//   make('text' | 'circle' | 'rect' | 'group' | 'character', 'ชื่อ', { x, y, text, color, size, w, h, parent })  → สร้างเลเยอร์ที่เวลาปัจจุบัน
+//   remove('ชื่อ')  → ซ่อนตั้งแต่เวลาปัจจุบัน · remove('ชื่อ', { delete: true }) → ลบถาวร
+//   edit('ชื่อ', { x, y, scale, rotation, opacity, duration })  หรือ  edit('ชื่อ', { text, color, size, w, h })  → แก้ค่า ณ เวลาปัจจุบัน
+
+at(0)
+animate('Title', { opacity: 1, scale: 1.1, duration: 0.8 })
+
+at(0.8)
+speak('สวัสดีครับ ยินดีต้อนรับ!', 2.4)
+
+// พยักหน้า
+at(0.8)
+rotateBone('Head', 14, 0.25); wait(0.25)
+rotateBone('Head', -6, 0.25); wait(0.25)
+rotateBone('Head', 0, 0.25)
+
+// ยกแขนขวาโบกมือ 3 ครั้ง
+at(1.6)
+rotateBone('ArmR', 20, 0.5); wait(0.5)
+for (let i = 0; i < 3; i++) {
+  rotateBone('ForearmR', -35, 0.25); wait(0.25)
+  rotateBone('ForearmR', 35, 0.25); wait(0.25)
+}
+rotateBone('ForearmR', 0, 0.2)
+rotateBone('ArmR', 160, 0.6)
+
+// แขนซ้ายเอื้อมไปชี้ที่จุด (330, 760) ด้วย IK
+at(3.6)
+ikTarget('ForearmL', 330, 760, 0.8)
+speak('ขยับข้อต่อด้วยโค้ดได้เลย', 2)
+rotateBone('ArmL', 200, 0.6)
+rotateBone('ForearmL', 0, 0.6)
+`
+
+const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}.${String(Math.floor((t % 1) * 100)).padStart(2, '0')}`
+const hasKey = (l, p, t) => (l.keys[p] || []).some(k => Math.abs(k.t - t) < 0.02)
+
+/* ───────── แอปหลัก ───────── */
+function App() {
+  const [boot] = useState(() => runScript(DEFAULT_SCRIPT, [
+    mk('text', 'Title', { text: 'สวัสดีชาวโลก 👋', y: 380, size: 96, opacity: 0, scale: 0.6, color: '#fde68a' }),
+    mk('camera', 'Camera'),
+    ...rig(),
+  ], 6))
+  const [layers, setLayers] = useState(boot.layers)
+  const [subs, setSubs] = useState(boot.subs)
+  const [duration, setDuration] = useState(boot.duration)
+  const [time, setTime] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [sel, setSel] = useState(null)
+  const [code, setCode] = useState(DEFAULT_SCRIPT)
+  const [err, setErr] = useState('')
+  const [ease, setEase] = useState('ease')
+  const [fmtOut, setFmtOut] = useState('webm')
+  const [exporting, setExporting] = useState(false)
+  const [ver, setVer] = useState(0)
+  const [tool, setTool] = useState('select')
+  const [showBones, setShowBones] = useState(true)
+  const [keepBones, setKeepBones] = useState(false)
+  const [preview, setPreview] = useState(null)
+  const [selKeys, setSelKeys] = useState([]), [box, setBox] = useState(null), [armed, setArmed] = useState(false), [charMenu, setCharMenu] = useState(false)
+  const [bg, setBg] = useState('#1e1b4b'), [snap, setSnap] = useState(false), [grid, setGrid] = useState(50)
+  const [fps, setFps] = useState(30), [expScale, setExpScale] = useState(1), [size, setSize] = useState({ w: 1080, h: 1920 })
+  const [subStyle, setSubStyle] = useState('box'), [tts, setTts] = useState(false), [audios, setAudios] = useState([])
+  W = size.w; H = size.h
+  const sn = v => (snap ? Math.round(v / grid) * grid : v)
+  const [trans, setTrans] = useState(boot.trans)
+  const [ttsApi, setTtsApi] = useState(() => {
+    const d = { provider: 'openai', url: OPENAI_URL, key: '', model: 'tts-1', voice: 'alloy', vx: { speed: 1, nfe: 32, seed: '', phoneme: false } }
+    try { return { ...d, ...JSON.parse(localStorage.getItem('anim-studio-tts') || '{}') } } catch (e) { return d }
+  })
+  const [ttsBusy, setTtsBusy] = useState('')
+  const [vxRefs, setVxRefs] = useState(() => { try { return JSON.parse(localStorage.getItem('anim-studio-vajax-refs') || '[]') } catch (e) { return [] } }) // เสียงอ้างอิง VAJAX [{id,name,b64,text,dur}]
+  const vxIn = useRef(), ttsSig = useRef(''), [hgVoices, setHgVoices] = useState([]), [orModels, setOrModels] = useState([])
+  const [fastBusy, setFastBusy] = useState(false), [expProg, setExpProg] = useState(0), [fastExp, setFastExp] = useState(true), cancelExp = useRef(false)
+  const fastOK = typeof VideoEncoder !== 'undefined' && typeof AudioEncoder !== 'undefined' && typeof Mp4Muxer !== 'undefined'
+  const fast = fastExp && fastOK
+  const keyOk = !!ttsApi.key || ttsApi.provider === 'edge' || /^(https?:\/\/)?(localhost|127\.0\.0\.1)/i.test(ttsApi.url || '') // เซิร์ฟเวอร์ในเครื่องไม่ต้องใช้คีย์
+  const [sfxs, setSfxs] = useState([]), [autoSfx, setAutoSfx] = useState(true), [sfxVol, setSfxVol] = useState(0.8), [sfxPick, setSfxPick] = useState('pop')
+  const [voices, setVoices] = useState([])
+  const [ttsOpt, setTtsOpt] = useState(() => {
+    const d = { voice: '', rate: 1, pitch: 1, vol: 1 }
+    try { return { ...d, ...JSON.parse(localStorage.getItem('anim-studio-gtts') || '{}') } } catch (e) { return d }
+  })
+  const hist = useRef(null), clipKind = useRef('keys'), layerClip = useRef(null), projIn = useRef(), booting = useRef(true)
+
+  /* Undo / Redo: จับเป็นก้อน (ลากต่อเนื่อง = 1 ขั้น) */
+  hist.current ||= { past: [], future: [], cm: { layers, subs, duration } }
+  useEffect(() => {
+    const h = hist.current, id = setTimeout(() => {
+      if (layers !== h.cm.layers || subs !== h.cm.subs) { h.past.push(h.cm); if (h.past.length > 100) h.past.shift(); h.cm = { layers, subs, duration }; h.future = [] }
+    }, 350)
+    return () => clearTimeout(id)
+  }, [layers, subs])
+  const applySnap = o => { setLayers(o.layers); setSubs(o.subs); setDuration(o.duration); setSelKeys([]) }
+  const undo = () => {
+    const h = hist.current, c = R.current, cur0 = { layers: c.layers, subs: c.subs, duration: c.duration }
+    const tg = cur0.layers !== h.cm.layers || cur0.subs !== h.cm.subs ? h.cm : h.past.pop()
+    if (!tg) return
+    h.future.push(cur0); h.cm = tg; applySnap(tg)
+  }
+  const redo = () => { const h = hist.current, n = h.future.pop(); if (!n) return; h.past.push(h.cm); h.cm = n; applySnap(n) }
+
+  const cv = useRef(), content = useRef(), fileRef = useRef(), recRef = useRef()
+  const audioIn = useRef(), bgFile = useRef(), bgImg = useRef(), exportCv = useRef(), clip = useRef([]), ac = useRef(), dest = useRef(), srcs = useRef([])
+  const imgs = useRef(new Map()), drag = useRef(null), R = useRef({})
+  R.current = { layers, time, sel, duration, selKeys, subs, tts, exporting, sfxs, autoSfx, sfxVol, voices, ttsOpt, ttsAudio: audios.some(a => a.tts), audios }
+
+  const cur = layers.find(l => l.id === sel)
+  const flat = flatten(layers)
+  const patch = (id, o) => setLayers(ls => ls.map(l => (l.id === id ? { ...l, ...o } : l)))
+  const upd = (id, fn) => setLayers(ls => ls.map(l => (l.id === id ? fn(l) : l)))
+
+  useEffect(() => { document.fonts.load(`700 90px ${FONT}`).then(() => setVer(v => v + 1)) }, [])
+  useEffect(() => {
+    const k = e => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return
+      const s = R.current, mod = e.ctrlKey || e.metaKey, kk = e.key.toLowerCase()
+      if (e.code === 'Space') { e.preventDefault(); togglePlay() }
+      else if (mod && kk === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo() }
+      else if (mod && kk === 'y') { e.preventDefault(); redo() }
+      else if (mod && kk === 'd' && s.sel) { e.preventDefault(); dup(s.sel) }
+      else if (mod && kk === 'c' && s.selKeys.length) { clipKind.current = 'keys'; copyKeys() }
+      else if (mod && kk === 'c' && s.sel) { clipKind.current = 'layer'; layerClip.current = s.sel }
+      else if (mod && kk === 'v') { if (clipKind.current === 'layer' && layerClip.current) dup(layerClip.current); else pasteKeys() }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { if (s.selKeys.length) delSelKeys(); else if (s.sel) remove(s.sel) }
+      else if (kk === 'k' && s.sel && !mod) keyAll()
+      else if (e.key.startsWith('ArrowLeft') || e.key.startsWith('ArrowRight') || e.key.startsWith('ArrowUp') || e.key.startsWith('ArrowDown')) {
+        if (!s.sel) return
+        e.preventDefault()
+        const st = e.shiftKey ? 10 : 1, dx = e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0, dy = e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0
+        upd(s.sel, l => setProp(setProp(l, 'x', val(l, 'x', s.time) + dx, s.time), 'y', val(l, 'y', s.time) + dy, s.time))
+      }
+    }
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k)
+  })
+
+  /* วาดแคนวาส */
+  useEffect(() => {
+    const c = cv.current, ctx = c.getContext('2d')
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H)
+    const bi = bgImg.current
+    if (bi && bi.naturalWidth) { const k = Math.max(W / bi.naturalWidth, H / bi.naturalHeight); ctx.drawImage(bi, (W - bi.naturalWidth * k) / 2, (H - bi.naturalHeight * k) / 2, bi.naturalWidth * k, bi.naturalHeight * k) }
+    const world = computeWorld(layers, time)
+    flat.forEach(({ l }) => l.visible && drawLayer(ctx, l, world.get(l.id), time, imgs.current))
+    if (snap && !exporting) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1; ctx.beginPath()
+      for (let x = 0; x <= W; x += grid) { ctx.moveTo(x, 0); ctx.lineTo(x, H) }
+      for (let y = 0; y <= H; y += grid) { ctx.moveTo(0, y); ctx.lineTo(W, y) }
+      ctx.stroke()
+    }
+    if (showBones && (!exporting || keepBones)) drawBones(ctx, layers, world, sel)
+    if (preview) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 6; ctx.setLineDash([16, 10])
+      ctx.beginPath(); ctx.moveTo(preview.a.x, preview.a.y); ctx.lineTo(preview.b.x, preview.b.y); ctx.stroke(); ctx.setLineDash([])
+    }
+    const sub = subs.find(s => time >= s.start && time < s.end)
+    if (sub) drawSub(ctx, sub.text, subStyle)
+    if (!exporting && cur && cur.visible) {
+      const b = bounds(ctx, cur, imgs.current)
+      if (b) drawGizmo(ctx, world.get(cur.id), b, c.getBoundingClientRect().width / W)
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1
+    const tr = trans.find(x => time >= x.start && time <= x.start + x.dur)
+    if (tr) {
+      const u = (time - tr.start) / tr.dur
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = tr.type === 'flash' ? '#fff' : '#000'
+      if (tr.type === 'wipe') { const a = Math.min(1, 2 * u) * W, b0 = u < 0.5 ? 0 : (2 * u - 1) * W; ctx.fillRect(b0, 0, a - b0, H) }
+      else { ctx.globalAlpha = 1 - Math.abs(2 * u - 1); ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1 }
+    }
+    const oc = exportCv.current
+    if (oc) oc.getContext('2d').drawImage(c, 0, 0, oc.width, oc.height)
+  }, [layers, subs, time, sel, exporting, ver, showBones, keepBones, preview, bg, snap, grid, subStyle, size, trans])
+
+  /* เล่น / หยุด */
+  const finish = () => {
+    setPlaying(false)
+    if (recRef.current) setTimeout(() => { recRef.current?.stop(); recRef.current = null; setExporting(false) }, 250)
+  }
+  useEffect(() => {
+    if (!playing) return
+    const t0 = performance.now() - R.current.time * 1000
+    let lastT = R.current.time - 0.001 // ลบเล็กน้อย เพื่อให้ซับ/เสียงที่เริ่มตรงเวลาปัจจุบัน (เช่น 0 วิ) ถูกอ่านด้วย
+    startAudio(R.current.time)
+    let raf
+    const tick = now => {
+      const t = (now - t0) / 1000
+      if (t >= R.current.duration) { setTime(R.current.duration); finish(); return }
+      if (R.current.tts && !R.current.exporting && !R.current.ttsAudio) R.current.subs.filter(x => x.start > lastT && x.start <= t).forEach(speakSub)
+      lastT = t; setTime(t); raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => { cancelAnimationFrame(raf); stopAudio(); try { speechSynthesis.cancel() } catch (e) {} }
+  }, [playing])
+  const togglePlay = () => {
+    if (exporting) return
+    if (!playing && R.current.time >= R.current.duration - 0.01) setTime(0)
+    setPlaying(p => !p)
+  }
+
+  /* Export วิดีโอด้วย MediaRecorder */
+  const scaleNow = () => (expScale === '4k' ? 3840 / Math.max(W, H) : +expScale || 1)
+  // สร้างเสียงจาก API ก่อน Export ถ้าซับ/ค่าเสียงเปลี่ยน · คืน false = ผู้ใช้ยกเลิก
+  const autoVoices = async () => {
+    if (ttsApi.autoExport !== false && R.current.subs.length && keyOk && (ttsApi.provider !== 'vajax' || vxRefs.length) && ttsSig.current !== ttsSigNow()) {
+      const n = await genTTS()
+      if (n == null && !confirm('สร้างเสียงพูดจาก API ไม่สำเร็จ — Export ต่อโดยไม่มีเสียงพูดใหม่ไหม?')) return false
+      await new Promise(r => setTimeout(r, 80)) // รอ state เสียงที่เพิ่งสร้างอัปเดต
+    }
+    if (R.current.tts && R.current.subs.length && !R.current.audios.some(a => a.tts))
+      return confirm('เสียงจาก Web Speech อัดลงไฟล์วิดีโอไม่ได้ (เบราว์เซอร์ไม่เปิดให้ดึงเสียงออกมา)\nวิดีโอจะไม่มีเสียงพูด — ใส่ API key + เสียงอ้างอิง (VAJAX) เพื่อให้สร้างเสียงจริงตอน Export\n\nExport ต่อโดยไม่มีเสียงพูดไหม?')
+    return true
+  }
+  const yieldUI = () => new Promise(r => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(0) }) // ไม่โดนหน่วงเวลาตอนสลับแท็บ เหมือน setTimeout
+  // มิกซ์เสียงทั้งหมด (ไฟล์เสียง + เสียง TTS + SFX) แบบออฟไลน์ ได้เร็วกว่าเวลาจริง
+  const renderAudioOffline = async dur => {
+    const rc = R.current, sr = 48000, oc = new OfflineAudioContext(2, Math.max(1, Math.ceil(dur * sr)), sr)
+    rc.audios.forEach(au => {
+      const vol = au.vol ?? 1, len = au.buf.duration, c0 = Math.max(0, au.start), total = au.loop ? Math.max(0.1, dur - au.start) : len, fi = au.fadeIn || 0, fo = au.fadeOut || 0
+      const x = oc.createBufferSource(), g = oc.createGain()
+      x.buffer = au.buf; x.loop = !!au.loop; x.connect(g); g.connect(oc.destination)
+      g.gain.setValueAtTime(fi ? 0 : vol, c0)
+      if (fi) g.gain.linearRampToValueAtTime(vol, c0 + fi)
+      if (fo) { g.gain.setValueAtTime(vol, Math.max(c0 + fi, c0 + total - fo)); g.gain.linearRampToValueAtTime(0, c0 + total) }
+      x.start(c0); if (au.loop) x.stop(c0 + total)
+    })
+    const evs = rc.sfxs.filter(e => rc.autoSfx || !e.auto)
+    if (evs.length) {
+      const bus = oc.createGain(); bus.gain.value = rc.sfxVol; bus.connect(oc.destination)
+      evs.forEach(e => { for (let i = 0; i < (e.rep || 1); i++) playSfx(oc, bus, e.name, e.at + i * (e.gap || 0.07) + 0.01, e.vol ?? 1) })
+    }
+    return oc.startRendering()
+  }
+  // Export แบบเร็ว: เรนเดอร์ทีละเฟรมด้วย WebCodecs → MP4 (ไม่ต้องรอเล่นตามเวลาจริง · ขนาดจริง/4K คมชัดเต็ม)
+  const exportFast = async () => {
+    if (!(await autoVoices())) return
+    setPlaying(false)
+    const rc = R.current, layersX = rc.layers, dur = rc.duration, fpsX = fps, k = scaleNow()
+    const w = Math.round((W * k) / 2) * 2, h = Math.round((H * k) / 2) * 2, bitrate = Math.round(Math.min(80e6, Math.max(4e6, w * h * fpsX * 0.12)))
+    let vpick = null
+    for (const [m, c] of [['avc', 'avc1.640034'], ['avc', 'avc1.640033'], ['avc', 'avc1.64002A'], ['vp9', 'vp09.00.51.08'], ['vp9', 'vp09.00.50.08']]) {
+      try { if ((await VideoEncoder.isConfigSupported({ codec: c, width: w, height: h, bitrate, framerate: fpsX })).supported) { vpick = [m, c]; break } } catch (e) {}
+    }
+    if (!vpick) return alert(`เบราว์เซอร์นี้เข้ารหัสวิดีโอขนาด ${w}×${h} ไม่ได้ — ลองลดขนาด หรือปิดโหมด Export เร็ว (แนะนำ Chrome / Edge)`)
+    const hasAudio = rc.audios.length > 0 || rc.sfxs.some(e => rc.autoSfx || !e.auto)
+    let apick = null
+    if (hasAudio) for (const [m, c] of [['aac', 'mp4a.40.2'], ['opus', 'opus']]) {
+      try { if ((await AudioEncoder.isConfigSupported({ codec: c, sampleRate: 48000, numberOfChannels: 2, bitrate: 192000 })).supported) { apick = [m, c]; break } } catch (e) {}
+    }
+    if (hasAudio && !apick && !confirm('เบราว์เซอร์นี้เข้ารหัสเสียงไม่ได้ — Export โดยไม่มีเสียงไหม?')) return
+    cancelExp.current = false; setExpProg(0); setFastBusy(true)
+    let encErr = null
+    try {
+      const mo = { target: new Mp4Muxer.ArrayBufferTarget(), video: { codec: vpick[0], width: w, height: h }, fastStart: 'in-memory' }
+      if (apick) mo.audio = { codec: apick[0], sampleRate: 48000, numberOfChannels: 2 }
+      const muxer = new Mp4Muxer.Muxer(mo)
+      const venc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => { encErr = e } })
+      venc.configure({ codec: vpick[1], width: w, height: h, bitrate, framerate: fpsX })
+      let aenc = null, ab = null, ch = null, apos = 0
+      if (apick) {
+        ab = await renderAudioOffline(dur); ch = [ab.getChannelData(0), ab.getChannelData(ab.numberOfChannels > 1 ? 1 : 0)]
+        aenc = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: e => { encErr = e } })
+        aenc.configure({ codec: apick[1], sampleRate: 48000, numberOfChannels: 2, bitrate: 192000 })
+      }
+      const feedAudio = until => { // ป้อนเสียงสลับกับวิดีโอตามเวลา เพื่อให้ไฟล์ MP4 สอดแทรกถูกต้อง
+        while (aenc && apos < Math.min(ab.length, Math.round(until * 48000))) {
+          const n = Math.min(4096, ab.length - apos), data = new Float32Array(n * 2)
+          data.set(ch[0].subarray(apos, apos + n), 0); data.set(ch[1].subarray(apos, apos + n), n)
+          const ad = new AudioData({ format: 'f32-planar', sampleRate: 48000, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round((apos / 48000) * 1e6), data })
+          aenc.encode(ad); ad.close(); apos += n
+        }
+      }
+      const oc = document.createElement('canvas'); oc.width = w; oc.height = h
+      const ctx = oc.getContext('2d'), orig = ctx.setTransform.bind(ctx)
+      ctx.setTransform = (a, b, c, d, e, f) => (a && typeof a === 'object' ? orig(new DOMMatrix([k, 0, 0, k, 0, 0]).multiply(DOMMatrix.fromMatrix(a))) : orig(a * k, b * k, c * k, d * k, e * k, f * k)) // วาดด้วยพิกัดเดิม แต่ขยายเป็นความละเอียดจริง
+      const renderAt = t => {
+        ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H)
+        const bi = bgImg.current
+        if (bi && bi.naturalWidth) { const q = Math.max(W / bi.naturalWidth, H / bi.naturalHeight); ctx.drawImage(bi, (W - bi.naturalWidth * q) / 2, (H - bi.naturalHeight * q) / 2, bi.naturalWidth * q, bi.naturalHeight * q) }
+        const world = computeWorld(layersX, t)
+        flatten(layersX).forEach(({ l }) => l.visible && drawLayer(ctx, l, world.get(l.id), t, imgs.current))
+        if (showBones && keepBones) drawBones(ctx, layersX, world, null)
+        const sub = subs.find(x => t >= x.start && t < x.end)
+        if (sub) drawSub(ctx, sub.text, subStyle)
+        ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1
+        const tr = trans.find(x => t >= x.start && t <= x.start + x.dur)
+        if (tr) {
+          const u = (t - tr.start) / tr.dur
+          ctx.fillStyle = tr.type === 'flash' ? '#fff' : '#000'
+          if (tr.type === 'wipe') { const a = Math.min(1, 2 * u) * W, b0 = u < 0.5 ? 0 : (2 * u - 1) * W; ctx.fillRect(b0, 0, a - b0, H) }
+          else { ctx.globalAlpha = 1 - Math.abs(2 * u - 1); ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1 }
+        }
+      }
+      const N = Math.max(1, Math.round(dur * fpsX)), step = Math.round(1e6 / fpsX)
+      for (let i = 0; i < N; i++) {
+        if (cancelExp.current || encErr) break
+        renderAt(i / fpsX)
+        const vf = new VideoFrame(oc, { timestamp: Math.round((i * 1e6) / fpsX), duration: step })
+        venc.encode(vf, { keyFrame: i % (fpsX * 2) === 0 }); vf.close()
+        feedAudio((i + 1) / fpsX)
+        while (venc.encodeQueueSize > 6 && !encErr) await yieldUI()
+        if (i % 3 === 0) { setExpProg(i / N); await yieldUI() }
+      }
+      if (cancelExp.current) { try { venc.close(); aenc && aenc.close() } catch (e) {} return }
+      if (encErr) throw encErr
+      feedAudio(dur + 1)
+      await venc.flush(); venc.close()
+      if (aenc) { await aenc.flush(); aenc.close() }
+      if (encErr) throw encErr
+      muxer.finalize()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(new Blob([muxer.target.buffer], { type: 'video/mp4' })); a.download = 'animation.mp4'; a.click()
+    } catch (e) { alert('Export ไม่สำเร็จ: ' + (e.message || e)) }
+    setFastBusy(false); setExpProg(0)
+  }
+  const doExport = async () => {
+    if (!(await autoVoices())) return
+    const types = fmtOut === 'mp4' ? ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'] : ['video/webm;codecs=vp9', 'video/webm']
+    const mime = types.find(t => MediaRecorder.isTypeSupported(t))
+    if (!mime) return alert('เบราว์เซอร์นี้ไม่รองรับการบันทึกวิดีโอ (แนะนำ Chrome)')
+    const oc = document.createElement('canvas')
+    oc.width = Math.round((W * scaleNow()) / 2) * 2; oc.height = Math.round((H * scaleNow()) / 2) * 2
+    exportCv.current = oc; oc.getContext('2d').drawImage(cv.current, 0, 0, oc.width, oc.height)
+    const stream = oc.captureStream(fps)
+    if (R.current.audios.length || sfxs.length) { const d = getAC().createMediaStreamDestination(); dest.current = d; d.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)) }
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 * scaleNow() })
+    const chunks = []
+    rec.ondataavailable = e => e.data.size && chunks.push(e.data)
+    rec.onstop = () => {
+      exportCv.current = null; dest.current = null
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(new Blob(chunks, { type: mime.split(';')[0] }))
+      a.download = `animation.${mime.includes('mp4') ? 'mp4' : 'webm'}`
+      a.click()
+    }
+    recRef.current = rec
+    setExporting(true); setTime(0)
+    rec.start(); setPlaying(true)
+  }
+
+  const getAC = () => (ac.current ||= new AudioContext())
+  const stopAudio = () => { srcs.current.forEach(x => { try { x.stop() } catch (e) {} }); srcs.current = [] }
+  const startAudio = from => {
+    const rc = R.current, evs = rc.sfxs.filter(e => rc.autoSfx || !e.auto)
+    if (!audios.length && !evs.length) return
+    const a = getAC(); a.resume()
+    audios.forEach(au => {
+      const vol = au.vol ?? 1, len = au.buf.duration, off = from - au.start
+      if (!au.loop && off >= len) return
+      const x = a.createBufferSource(), g = a.createGain(), p0 = Math.max(0, off), c0 = a.currentTime + Math.max(0, -off)
+      const total = au.loop ? Math.max(0.1, R.current.duration - au.start) : len, fi = au.fadeIn || 0, fo = au.fadeOut || 0
+      x.buffer = au.buf; x.loop = !!au.loop; x.connect(g); g.connect(a.destination); if (dest.current) g.connect(dest.current)
+      g.gain.setValueAtTime(fi ? vol * Math.min(1, p0 / fi) : vol, c0)
+      if (fi && p0 < fi) g.gain.linearRampToValueAtTime(vol, c0 + fi - p0)
+      if (fo) { g.gain.setValueAtTime(vol, Math.max(c0 + fi, c0 + total - fo - p0)); g.gain.linearRampToValueAtTime(0, c0 + total - p0) }
+      x.start(c0, au.loop ? p0 % len : p0)
+      if (au.loop) x.stop(c0 + total - p0)
+      srcs.current.push(x)
+    })
+    // Sound Effect สังเคราะห์: จัดคิวทั้งหมดล่วงหน้าด้วยนาฬิกาของ AudioContext (เวลาตรงเฟรม + ถูกอัดลงวิดีโอตอน Export)
+    if (evs.length) {
+      const bus = a.createGain(); bus.gain.value = rc.sfxVol; bus.connect(a.destination); if (dest.current) bus.connect(dest.current)
+      evs.forEach(e => {
+        for (let i = 0; i < (e.rep || 1); i++) {
+          const at = e.at + i * (e.gap || 0.07)
+          if (at < from - 0.001) continue
+          srcs.current.push(...playSfx(a, bus, e.name, a.currentTime + (at - from) + 0.01, e.vol ?? 1))
+        }
+      })
+    }
+  }
+  const previewSfx = name => {
+    const a = getAC(); a.resume()
+    const bus = a.createGain(); bus.gain.value = R.current.sfxVol; bus.connect(a.destination)
+    playSfx(a, bus, name, a.currentTime + 0.02, 1)
+  }
+  const updSfx = (id, p) => setSfxs(x => x.map(e => (e.id === id ? { ...e, ...p } : e)))
+  // อ่านซับด้วย Web Speech API (เสียง Google ของเบราว์เซอร์/ระบบ)
+  const speakSub = x => {
+    if (!('speechSynthesis' in window)) return
+    const o = R.current.ttsOpt, vs = R.current.voices
+    const u = new SpeechSynthesisUtterance(String(x.text).replace(/^[^:：]{1,20}[:：]\s*/, '')) // ตัดชื่อผู้พูดหน้า ":" ออก เหมือนตอนสร้างเสียง TTS API
+    const v = (x.voice && vs.find(q => q.name.toLowerCase().includes(String(x.voice).toLowerCase()))) || (o.voice && vs.find(q => q.voiceURI === o.voice)) || googleTh(vs)
+    if (v) { u.voice = v; u.lang = v.lang } else u.lang = 'th-TH'
+    u.rate = o.rate; u.pitch = o.pitch; u.volume = o.vol
+    speechSynthesis.speak(u)
+  }
+  const addAudio = async e => {
+    const f = e.target.files[0]; e.target.value = ''
+    if (!f) return
+    try {
+      const raw = await f.arrayBuffer(), buf = await getAC().decodeAudioData(raw.slice(0))
+      setAudios(a => [...a, { id: 'A' + uid++, name: f.name.slice(0, 18), buf, raw, start: 0 }])
+      setDuration(d => Math.max(d, Math.ceil(buf.duration * 10) / 10 + 0.5))
+    } catch (err) { alert('อ่านไฟล์เสียงไม่ได้') }
+  }
+  // Lip-sync จากความดังของเสียงจริง → สร้าง Keyframe ปากของตัวละคร / รูปทรง "Mouth"
+  const lipSync = au => {
+    const d = au.buf.getChannelData(0), win = Math.floor(au.buf.sampleRate * 0.06), n = Math.floor(d.length / win), env = []
+    for (let i = 0; i < n; i++) { let q = 0; for (let j = 0; j < win; j += 4) q += d[i * win + j] ** 2; env.push(Math.sqrt(q / (win / 4))) }
+    const mx = Math.max(...env, 1e-6)
+    setLayers(ls => {
+      const c = (au.who && ls.find(x => x.name === au.who)) || ls.find(x => x.type === 'character') || ls.find(x => x.name === 'Mouth')
+      if (!c) { alert('ไม่พบตัวละครหรือเลเยอร์ชื่อ "Mouth"'); return ls }
+      const pr = c.type === 'character' ? 'mouth' : 'scale', f = v => (pr === 'mouth' ? v : 0.4 + v * 0.9)
+      const keys = (c.keys[pr] || []).filter(k => k.t < au.start - 0.01 || k.t > au.start + au.buf.duration + 0.01).concat(env.map((v, i) => ({ t: au.start + i * 0.06, v: f(Math.min(1, (v / mx) * 1.5)), ease: 'linear', lip: true }))).sort((a, b) => a.t - b.t)
+      return ls.map(x => (x === c ? { ...x, keys: { ...x.keys, [pr]: keys } } : x))
+    })
+  }
+
+  /* เพิ่ม / ลบเลเยอร์ */
+  const add = l => { setLayers(ls => [...ls, l]); setSel(l.id) }
+  const nameOf = base => `${base} ${layers.filter(l => l.type === (base === 'Text' ? 'text' : base === 'Group' ? 'group' : 'character')).length + 1}`
+  const addImage = e => {
+    const f = e.target.files[0]; e.target.value = ''
+    if (!f) return
+    const l = mk('image', f.name.slice(0, 18))
+    const im = new Image(); im.onload = () => setVer(v => v + 1); im.src = URL.createObjectURL(f)
+    imgs.current.set(l.id, im); add(l)
+  }
+  const clearAll = () => {
+    if (!armed) { setArmed(true); setTimeout(() => setArmed(false), 3000); return } // กดครั้งแรก = ขอยืนยัน (ไม่ใช้ confirm() เพราะบางเบราว์เซอร์/พรีวิวบล็อก)
+    setArmed(false)
+    const r = recRef.current
+    if (r) { r.onstop = null; try { r.stop() } catch (e) {} }
+    recRef.current = null; exportCv.current = null; dest.current = null; setExporting(false)
+    setPlaying(false); setLayers([mk('camera', 'Camera')]); setSubs([]); setTrans([]); setAudios([]); setSfxs([]); setSel(null); setSelKeys([]); setTime(0); setDuration(6)
+    setCode('// เริ่มต้นใหม่: เพิ่มเลเยอร์/กระดูก แล้วเขียนสคริปต์ที่นี่\n'); setErr('')
+    bgImg.current = null; clip.current = []; setVer(v => v + 1)
+  }
+  const addChar = k => {
+    const taken = new Set(layers.map(l => l.name))
+    const parts = k === 'character' ? [mk('character', nameOf('Character'))] : makeChar(k, W / 2, H * 0.615, taken)
+    setLayers(ls => [...ls, ...parts]); setSel(parts[0].id); setCharMenu(false)
+  }
+  useEffect(() => { try { localStorage.setItem('anim-studio-tts', JSON.stringify(ttsApi)) } catch (e) {} }, [ttsApi])
+  useEffect(() => { try { localStorage.setItem('anim-studio-gtts', JSON.stringify(ttsOpt)) } catch (e) {} }, [ttsOpt])
+  useEffect(() => { try { localStorage.setItem('anim-studio-vajax-refs', JSON.stringify(vxRefs)) } catch (e) {} }, [vxRefs])
+  useEffect(() => { // เสียงของ Google/ระบบโหลดแบบ async ต้องรอ voiceschanged
+    if (!('speechSynthesis' in window)) return
+    const f = () => setVoices(speechSynthesis.getVoices())
+    f(); speechSynthesis.addEventListener('voiceschanged', f)
+    return () => speechSynthesis.removeEventListener('voiceschanged', f)
+  }, [])
+  // VAJAX-TTS: ส่งเสียงอ้างอิง (WAV base64) + ข้อความอ้างอิง + ข้อความที่จะพูด → ได้เสียงพูดที่เลียนเสียงอ้างอิง
+  const vajaxCall = async (ref, text) => {
+    const vx = ttsApi.vx || {}, body = { reference_audio: ref.b64, reference_text: ref.text.trim(), target_text: text, speed: +vx.speed || 1, nfe_steps: +vx.nfe || 32, use_phoneme: !!vx.phoneme }
+    if (vx.seed !== '' && vx.seed != null && !isNaN(+vx.seed)) body.seed = Math.max(0, Math.min(65535, Math.round(+vx.seed)))
+    const res = await fetch(ttsApi.url || VAJAX_URL, { method: 'POST', headers: { Apikey: ttsApi.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`)
+    if (/json/i.test(res.headers.get('content-type') || '')) { // เผื่อเซิร์ฟเวอร์ตอบเป็น JSON (base64 หรือลิงก์ไฟล์เสียง)
+      const j = await res.json(), a = j.audio || j.audio_base64 || j.audio_data || j.data || j.result || j.output, u = j.audio_url || j.url || (typeof a === 'string' && /^https?:/.test(a) ? a : '')
+      if (u) return (await fetch(u)).arrayBuffer()
+      if (typeof a === 'string') return b64ToBuf(a.replace(/^data:[^,]*,/, ''))
+      throw new Error('ไม่พบข้อมูลเสียงในผลลัพธ์: ' + JSON.stringify(j).slice(0, 120))
+    }
+    return res.arrayBuffer()
+  }
+  const pickRef = voice => vxRefs.find(r => r.name === voice) || vxRefs.find(r => r.id === ttsApi.voice) || vxRefs[0]
+  // ดาวน์โหลดไฟล์เสียงที่สร้างไว้ (ตรวจชนิดไฟล์จากไบต์แรก)
+  const dlAudio = a => {
+    const u = new Uint8Array(a.raw, 0, 4), t = String.fromCharCode(...u), ext = t === 'RIFF' ? 'wav' : t === 'OggS' ? 'ogg' : t === 'fLaC' ? 'flac' : 'mp3'
+    const l = document.createElement('a'); l.href = URL.createObjectURL(new Blob([a.raw], { type: ext === 'mp3' ? 'audio/mpeg' : `audio/${ext}` })); l.download = `${a.name.replace(/[^\w\u0E00-\u0E7F.-]+/g, '_')}.${ext}`; l.click()
+  }
+  const dlAll = async () => { for (const a of audios.filter(x => x.tts)) { dlAudio(a); await new Promise(r => setTimeout(r, 300)) } }
+  const addRef = async e => {
+    const f = e.target.files[0]; e.target.value = ''
+    if (!f) return
+    try {
+      const ab = await getAC().decodeAudioData(await f.arrayBuffer()), b64 = bufToB64(await toWav(ab))
+      setVxRefs(r => { let name = f.name.replace(/\.[^.]+$/, '').slice(0, 16) || 'voice', n = name, i = 2; while (r.some(x => x.name === n)) n = `${name}_${i++}`; return [...r, { id: 'V' + Date.now(), name: n, b64, text: '', dur: ab.duration }] })
+    } catch (err) { alert('อ่านไฟล์เสียงไม่ได้: ' + err.message) }
+  }
+  const updRef = (id, p) => setVxRefs(r => r.map(x => (x.id === id ? { ...x, ...p } : x)))
+  const playBuf = buf => { const a = getAC(), s = a.createBufferSource(); s.buffer = buf; s.connect(a.destination); s.start() }
+  const testVx = async () => {
+    const ref = pickRef()
+    if (!keyOk) return alert('ใส่ API key ก่อน')
+    if (!ref) return alert('เพิ่มเสียงอ้างอิงก่อน')
+    if (!ref.text.trim()) return alert('ใส่ข้อความของเสียงอ้างอิงก่อน')
+    setTtsBusy('ทดลอง')
+    try { playBuf(await getAC().decodeAudioData(await vajaxCall(ref, 'สวัสดีครับ ทดสอบเสียงพูด')))} catch (e) { alert('สร้างเสียงไม่สำเร็จ: ' + e.message) }
+    setTtsBusy('')
+  }
+  // OpenAI-compatible (OpenAI / OpenRouter): ขอ mp3 ก่อน ถ้าโมเดลรองรับเฉพาะ pcm/wav ให้ลองใหม่ด้วยรูปแบบนั้นอัตโนมัติ แล้วห่อ PCM เป็น WAV
+  const speechCompat = async (voice, text) => {
+    const post = fmt => fetch(ttsApi.url, { method: 'POST', headers: { Authorization: `Bearer ${ttsApi.key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: ttsApi.model, voice, input: text, response_format: fmt }) })
+    let res = await post('mp3'), fmt = 'mp3'
+    if (!res.ok) {
+      const t = await res.text(), m = t.match(/response_format[^a-z]*(pcm|wav)/i)
+      if (!m) throw new Error(`${res.status} ${t.slice(0, 120)}`)
+      fmt = m[1].toLowerCase(); res = await post(fmt)
+    }
+    if (!res.ok || fmt !== 'pcm') return res
+    const ct = res.headers.get('content-type') || '', rate = +ttsApi.pcmRate || +(ct.match(/rate=(\d+)/) || [])[1] || (/heygen/i.test(ttsApi.model) ? 44100 : 24000), ch = +(ct.match(/channels=(\d+)/) || [])[1] || 1
+    return new Response(pcmToWav(await res.arrayBuffer(), rate, ch))
+  }
+  // Edge TTS: เรียกผ่าน Endpoint บนเซิร์ฟเวอร์ (/api/edge ตอน deploy บน Vercel) ก่อน — ถ้าไม่มีค่อยลองเรียกจากเบราว์เซอร์ตรงๆ
+  // (Microsoft มักตอบ 403 เมื่อเรียกจากเบราว์เซอร์ จึงใช้ได้จริงเฉพาะแบบมีเซิร์ฟเวอร์)
+  const edgeCall = async (voice, text) => {
+    let e1, e2
+    try {
+      const res = await speechCompat(voice, text)
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 100)}`)
+      return await res.arrayBuffer()
+    } catch (e) { e1 = e }
+    try {
+      const { EdgeTTS } = await import(EDGE_CDN)
+      const r = await new EdgeTTS(text, voice).synthesize()
+      return await r.audio.arrayBuffer()
+    } catch (e) { e2 = e }
+    throw new Error(`Edge TTS ใช้ไม่ได้ — เซิร์ฟเวอร์ (${ttsApi.url}): ${e1?.message || e1} · เบราว์เซอร์ตรงๆ: ${e2?.message || e2 || 'ถูก Microsoft ปฏิเสธ (403)'} → deploy บน Vercel เพื่อใช้ /api/edge`)
+  }
+  // HeyGen TTS (Starfish): ส่งข้อความ + voice_id → ได้ลิงก์ไฟล์เสียง แล้วดาวน์โหลดมาใช้
+  const heygenCall = async (voice, text) => {
+    const res = await fetch(ttsApi.url || HEYGEN_URL, { method: 'POST', headers: { 'X-Api-Key': ttsApi.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ text, voice_id: voice, input_type: 'text', speed: +ttsApi.hgSpeed || 1 }) })
+    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`)
+    const j = await res.json()
+    if (j.error) throw new Error(j.error.message || JSON.stringify(j.error).slice(0, 120))
+    const u = j.data?.audio_url
+    if (!u) throw new Error('ไม่พบ audio_url ในผลลัพธ์: ' + JSON.stringify(j).slice(0, 120))
+    const r2 = await fetch(u)
+    if (!r2.ok) throw new Error(`ดาวน์โหลดไฟล์เสียงไม่ได้ (${r2.status})`)
+    return r2.arrayBuffer()
+  }
+  // ดึงรายชื่อโมเดลเสียงที่ OpenRouter มีอยู่ตอนนี้ (ชื่อโมเดลเปลี่ยนบ่อย — ไม่ต้องเดา)
+  const loadOrModels = async () => {
+    setTtsBusy('โหลดโมเดล')
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/models?output_modalities=speech', { headers: ttsApi.key ? { Authorization: `Bearer ${ttsApi.key}` } : {} })
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`)
+      const j = await res.json(), arr = (j.data || []).map(m => ({ id: m.id, name: m.name || m.id, voices: (m.supported_voices || []).map(v => (typeof v === 'string' ? v : v.id || v.name || v.voice_id)).filter(Boolean) }))
+      setOrModels(arr)
+      if (!arr.length) alert('ไม่พบโมเดลเสียงในรายการ')
+    } catch (e) { alert('โหลดรายชื่อโมเดลไม่ได้: ' + e.message) }
+    setTtsBusy('')
+  }
+  const loadHgVoices = async () => {
+    if (!ttsApi.key) return alert('ใส่ API key ก่อน')
+    setTtsBusy('โหลดเสียง')
+    try {
+      const all = []; let token = ''
+      for (let i = 0; i < 15; i++) {
+        const u = new URL('https://api.heygen.com/v3/voices'); u.searchParams.set('engine', 'starfish'); if (token) u.searchParams.set('token', token)
+        const res = await fetch(u, { headers: { 'X-Api-Key': ttsApi.key, Accept: 'application/json' } })
+        if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`)
+        const j = await res.json(), d = j.data, arr = Array.isArray(d) ? d : d?.voices || j.voices || []
+        all.push(...arr); token = j.next_token || d?.next_token || j.pagination?.next_token || ''
+        if (!token || !arr.length) break
+      }
+      const th = all.filter(v => /thai|(^|[^a-z])th([^a-z]|$)/i.test(`${v.language || ''} ${v.locale || ''}`))
+      setHgVoices(th.length ? th : all)
+      if (!all.length) alert('ไม่พบรายชื่อเสียง — ใส่ Voice ID เองได้')
+      else if (!th.length) alert('ไม่พบเสียงที่ระบุว่าเป็นภาษาไทย — แสดงเสียงทั้งหมดแทน')
+    } catch (e) { alert('โหลดรายชื่อเสียงไม่ได้: ' + e.message) }
+    setTtsBusy('')
+  }
+  // ลายเซ็นของ "ซับ + ค่าเสียง" — ใช้ดูว่าเสียงที่สร้างไว้ยังตรงกับงานปัจจุบันไหม (ไม่ตรง = สร้างใหม่ตอน Export)
+  const ttsSigNow = () => JSON.stringify([R.current.subs.map(x => [x.text, x.start, x.voice, x.who]), ttsApi.provider, ttsApi.url, ttsApi.model, ttsApi.voice, ttsApi.vx, vxRefs.map(r => [r.name, r.text, r.b64.length])])
+  const genTTS = async () => {
+    const list = R.current.subs, vx = ttsApi.provider === 'vajax'
+    if (!list.length) return alert('ยังไม่มีซับไตเติล — รันสคริปต์ที่มีคำสั่ง speak() ก่อน') ?? null
+    if (!keyOk) return alert('ใส่ API key ก่อน') ?? null
+    if (vx && !vxRefs.length) return alert('เพิ่มเสียงอ้างอิง (+ ข้อความของเสียงนั้น) ก่อน') ?? null
+    const out = []; let ok = false
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const sb = list[i], voice = sb.voice || ttsApi.voice
+        setTtsBusy(`${i + 1}/${list.length}`)
+        const text = sb.text.replace(/^[^:：]{1,20}[:：]\s*/, '') // ตัดชื่อผู้พูด เช่น "ทนาย 130:" ออกก่อนอ่าน
+        let raw
+        if (vx) {
+          const ref = pickRef(voice)
+          if (!ref.text.trim()) throw new Error(`ใส่ข้อความของเสียงอ้างอิง "${ref.name}" ก่อน`)
+          raw = await vajaxCall(ref, text)
+        } else if (ttsApi.provider === 'edge') {
+          raw = await edgeCall(voice, text)
+        } else if (ttsApi.provider === 'openrouter' && !ttsApi.model) {
+          throw new Error('ยังไม่ได้เลือกโมเดล — กด "โหลดรายชื่อโมเดลเสียงที่ใช้ได้" แล้วเลือก')
+        } else if (ttsApi.provider === 'heygen') {
+          if (!voice) throw new Error('ใส่ Voice ID ของ HeyGen ก่อน')
+          raw = await heygenCall(voice, text)
+        } else {
+          const res = ttsApi.provider === 'eleven'
+            ? await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}`, { method: 'POST', headers: { 'xi-api-key': ttsApi.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ text, model_id: ttsApi.model }) })
+            : await speechCompat(voice, text)
+          if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`)
+          raw = await res.arrayBuffer()
+        }
+        const buf = await getAC().decodeAudioData(raw.slice(0))
+        out.push({ id: 'A' + uid++, name: `tts_${i + 1}`, buf, raw, start: sb.start, who: sb.who, tts: true })
+      }
+      setAudios(a => [...a.filter(x => !x.tts), ...out])
+      out.forEach(au => lipSync(au))
+      setDuration(d => Math.max(d, ...out.map(o => Math.ceil((o.start + o.buf.duration) * 10) / 10 + 0.3)))
+      ttsSig.current = ttsSigNow(); ok = true
+    } catch (e) { alert('สร้างเสียงไม่สำเร็จ: ' + e.message) }
+    setTtsBusy('')
+    return ok ? out.length : null
+  }
+  const setP = (k, v) => upd(cur.id, l => ({ ...l, props: { ...l.props, [k]: v } }))
+  const dup = id => { // ทำสำเนาเลเยอร์พร้อมลูกทั้งหมด (ตัวละครทั้งตัวถ้าเลือกกระดูกราก/กลุ่ม)
+    const all = R.current.layers, taken = new Set(all.map(l => l.name)), ids = [id]
+    const walk = pid => all.filter(l => l.parent === pid).forEach(l => { ids.push(l.id); walk(l.id) }); walk(id)
+    const src = ids.map(i => all.find(l => l.id === i)), map = {}
+    src.forEach(l => { map[l.id] = 'L' + uid++ })
+    let k = 2; while (src.some(l => taken.has(`${l.name}_${k}`))) k++
+    const parts = src.map(l => {
+      const n = { ...l, id: map[l.id], name: `${l.name}_${k}`, parent: l.id === id ? l.parent : map[l.parent], props: { ...l.props }, keys: JSON.parse(JSON.stringify(l.keys)) }
+      if (l.id === id) { n.props.x += 40; n.props.y += 40; ['x', 'y'].forEach(q => { if (n.keys[q]) n.keys[q] = n.keys[q].map(kk => ({ ...kk, v: kk.v + 40 })) }) }
+      const im = imgs.current.get(l.id); if (im) imgs.current.set(n.id, im)
+      return n
+    })
+    setLayers(ls => [...ls, ...parts]); setSel(parts[0].id)
+  }
+  const serialize = media => {
+    const o = { v: 1, layers, subs, trans, duration, bg, size, subStyle, snap, grid, fps, expScale, code, sfxs, autoSfx, sfxVol }
+    if (media) {
+      o.images = {}
+      layers.forEach(l => { const im = imgs.current.get(l.id); if (l.type === 'image' && im && im.naturalWidth) o.images[l.id] = imgUrl(im) })
+      if (bgImg.current && bgImg.current.naturalWidth) o.bgImage = imgUrl(bgImg.current)
+      o.audios = audios.map(a => ({ name: a.name, start: a.start, vol: a.vol, loop: a.loop, fadeIn: a.fadeIn, fadeOut: a.fadeOut, who: a.who, tts: a.tts, data: bufToB64(a.raw) }))
+    }
+    return o
+  }
+  const loadImg = url => new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = url })
+  const applyProject = async o => {
+    setPlaying(false)
+    imgs.current = new Map()
+    for (const [id, url] of Object.entries(o.images || {})) { const im = await loadImg(url); if (im) imgs.current.set(id, im) }
+    bgImg.current = o.bgImage ? await loadImg(o.bgImage) : null
+    const au = []
+    for (const a of o.audios || []) { try { const raw = b64ToBuf(a.data); au.push({ id: 'A' + uid++, name: a.name, start: a.start, vol: a.vol, loop: a.loop, fadeIn: a.fadeIn, fadeOut: a.fadeOut, who: a.who, tts: a.tts, raw, buf: await getAC().decodeAudioData(raw.slice(0)) }) } catch (e) {} }
+    uid = Math.max(uid, ...o.layers.map(l => +String(l.id).slice(1) || 0)) + 1
+    setLayers(o.layers); setSubs(o.subs || []); setTrans(o.trans || []); setDuration(o.duration || 6); setBg(o.bg || '#1e1b4b'); setSize(o.size || { w: 1080, h: 1920 })
+    setSubStyle(o.subStyle || 'box'); setSnap(!!o.snap); setGrid(o.grid || 50); setFps(o.fps || 30); setExpScale(o.expScale || 1)
+    setCode(o.code || ''); setAudios(au); setSfxs(o.sfxs || []); setAutoSfx(o.autoSfx !== false); setSfxVol(o.sfxVol ?? 0.8); setSel(null); setSelKeys([]); setTime(0); setVer(v => v + 1)
+    hist.current = { past: [], future: [], cm: { layers: o.layers, subs: o.subs || [], duration: o.duration || 6 } }
+  }
+  const saveProject = () => {
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(serialize(true))], { type: 'application/json' })); a.download = 'project.json'; a.click()
+  }
+  const openProject = async e => {
+    const f = e.target.files[0]; e.target.value = ''
+    if (!f) return
+    try { await applyProject(JSON.parse(await f.text())) } catch (err) { alert('เปิดไฟล์โปรเจกต์ไม่ได้: ' + err.message) }
+  }
+  useEffect(() => { // กู้งานล่าสุดจาก Autosave ตอนเปิดหน้า
+    let sv = null
+    try { sv = localStorage.getItem(SAVE_KEY) } catch (e) {}
+    if (!sv) { booting.current = false; return }
+    try { applyProject(JSON.parse(sv)).catch(() => {}).finally(() => { booting.current = false }) } catch (e) { booting.current = false }
+  }, [])
+  useEffect(() => { // Autosave (ถ้าพื้นที่ไม่พอ จะบันทึกแบบไม่รวมรูป/เสียง)
+    const id = setTimeout(() => {
+      if (booting.current) return
+      try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialize(true))) } catch (e) { try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialize(false))) } catch (e2) {} }
+    }, 1500)
+    return () => clearTimeout(id)
+  }, [layers, subs, trans, duration, bg, size, subStyle, snap, grid, fps, expScale, code, audios, sfxs, autoSfx, sfxVol, ver])
+  const remove = id => {
+    setLayers(ls => { const t = ls.find(x => x.id === id); return ls.filter(x => x.id !== id).map(x => (x.parent === id ? { ...x, parent: t.parent } : x)) })
+    setSel(null)
+  }
+  const reparent = (id, pid) => {
+    if (id === pid) return
+    for (let p = pid; p; p = layers.find(x => x.id === p)?.parent) if (p === id) return // กันวนลูป
+    const c = layers.find(x => x.id === id)
+    if (c.parent === pid) return
+    const w = computeWorld(layers, time), M = (pid ? w.get(pid).m : camMatrix(layers, time)).inverse().multiply(w.get(id).m)
+    const free = ['x', 'y', 'rotation', 'scale'].every(q => !c.keys[q]?.length)
+    patch(id, free ? { parent: pid, props: { ...c.props, x: M.e, y: M.f, rotation: (Math.atan2(M.b, M.a) * 180) / Math.PI, scale: Math.hypot(M.a, M.b) } } : { parent: pid })
+  }
+
+  /* ลากบน Viewport */
+  const toCanvas = e => { const r = cv.current.getBoundingClientRect(); return { x: ((e.clientX - r.left) * W) / r.width, y: ((e.clientY - r.top) * H) / r.height } }
+  const onDown = e => {
+    const s = R.current, p = toCanvas(e), vs = cv.current.getBoundingClientRect().width / W
+    const ctx = cv.current.getContext('2d'), world = computeWorld(s.layers, s.time)
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
+    if (tool === 'bone') { // เริ่มลากกระดูก: ถ้าเริ่มใกล้ปลายกระดูกใด จะเป็นกระดูกลูกของมัน
+      let par = null, best = 40 / vs
+      for (const l of s.layers) if (l.type === 'bone') { const dd = dist(p, world.get(l.id).m.transformPoint(new DOMPoint(l.props.len, 0))); if (dd < best) { best = dd; par = l } }
+      const p0 = par ? world.get(par.id).m.transformPoint(new DOMPoint(par.props.len, 0)) : p
+      drag.current = { mode: 'bone', p0, par, world }
+      setPreview({ a: p0, b: p }); e.currentTarget.setPointerCapture(e.pointerId)
+      return
+    }
+    const start = (mode, l, w) => {
+      const par = l.parent ? world.get(l.parent).m : camMatrix(s.layers, s.time)
+      drag.current = { mode, id: l.id, p0: p, c: w.m.transformPoint(new DOMPoint(0, 0)), pinv: par.inverse(),
+        x0: val(l, 'x', s.time), y0: val(l, 'y', s.time), s0: val(l, 'scale', s.time), r0: val(l, 'rotation', s.time) }
+      e.currentTarget.setPointerCapture(e.pointerId)
+    }
+    const c = s.layers.find(l => l.id === s.sel)
+    if (c && c.visible && !c.locked) {
+      const b = bounds(ctx, c, imgs.current), w = world.get(c.id)
+      if (b) {
+        if (dist(p, w.m.transformPoint(new DOMPoint(b.x + b.w / 2, b.y - 70))) < 28 / vs) return start('rotate', c, w)
+        for (const [x, y] of [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]])
+          if (dist(p, w.m.transformPoint(new DOMPoint(x, y))) < 28 / vs) return start('scale', c, w)
+      }
+    }
+    for (const { l } of [...flatten(s.layers)].reverse().sort((a, b) => (b.l.type === 'bone') - (a.l.type === 'bone'))) {
+      if (!l.visible || l.locked || (l.type === 'bone' && !showBones)) continue
+      const b = bounds(ctx, l, imgs.current)
+      if (!b) continue
+      const w = world.get(l.id), q = w.m.inverse().transformPoint(new DOMPoint(p.x, p.y))
+      if (q.x >= b.x && q.x <= b.x + b.w && q.y >= b.y && q.y <= b.y + b.h) { setSel(l.id); return start('move', l, w) }
+    }
+    setSel(null)
+  }
+  const onMove = e => {
+    const d = drag.current
+    if (!d || !d.mode) return
+    const p = toCanvas(e), t = R.current.time
+    if (d.mode === 'bone') return setPreview({ a: d.p0, b: p })
+    if (d.mode === 'move') {
+      const a = d.pinv.transformPoint(new DOMPoint(d.p0.x, d.p0.y)), b = d.pinv.transformPoint(new DOMPoint(p.x, p.y))
+      upd(d.id, l => setProp(setProp(l, 'x', sn(d.x0 + b.x - a.x), t), 'y', sn(d.y0 + b.y - a.y), t))
+    } else if (d.mode === 'scale') {
+      const k = Math.hypot(p.x - d.c.x, p.y - d.c.y) / Math.max(1, Math.hypot(d.p0.x - d.c.x, d.p0.y - d.c.y))
+      upd(d.id, l => setProp(l, 'scale', Math.max(0.05, d.s0 * k), t))
+    } else {
+      const da = Math.atan2(p.y - d.c.y, p.x - d.c.x) - Math.atan2(d.p0.y - d.c.y, d.p0.x - d.c.x)
+      upd(d.id, l => setProp(l, 'rotation', snap ? Math.round((d.r0 + (da * 180) / Math.PI) / 5) * 5 : d.r0 + (da * 180) / Math.PI, t))
+    }
+  }
+
+  const onUp = e => {
+    const d = drag.current; drag.current = null
+    if (!d || d.mode !== 'bone') return
+    const b = toCanvas(e), inv = d.par ? d.world.get(d.par.id).m.inverse() : camMatrix(R.current.layers, R.current.time).inverse()
+    const A = d.par ? { x: d.par.props.len, y: 0 } : inv.transformPoint(new DOMPoint(d.p0.x, d.p0.y)), Bp = inv.transformPoint(new DOMPoint(b.x, b.y))
+    const len = Math.hypot(Bp.x - A.x, Bp.y - A.y)
+    setPreview(null)
+    if (len < 20) return
+    const n = layers.filter(l => l.type === 'bone').length + 1
+    const nb = { ...mk('bone', `Bone ${n}`, { x: A.x, y: A.y, rotation: (Math.atan2(Bp.y - A.y, Bp.x - A.x) * 180) / Math.PI, len }), parent: d.par ? d.par.id : null }
+    add(nb)
+  }
+
+  /* Timeline */
+  const timeAt = ev => (ev.clientX - content.current.getBoundingClientRect().left - LABEL) / PPS
+  const kid = (id, t) => `${id}@${(+t).toFixed(3)}`
+  const marquee = e => {
+    const r0 = content.current.getBoundingClientRect(), x0 = e.clientX - r0.left, y0 = e.clientY - r0.top
+    const rect = ev => ({ x0, y0, x1: ev.clientX - r0.left, y1: ev.clientY - r0.top })
+    const mv = ev => setBox(rect(ev))
+    const up = ev => {
+      const b = rect(ev), xa = Math.min(b.x0, b.x1), xb = Math.max(b.x0, b.x1), ya = Math.min(b.y0, b.y1), yb = Math.max(b.y0, b.y1), out = []
+      flatten(R.current.layers).forEach(({ l }, i) => {
+        const cy = 24 + i * 28 + 14
+        if (cy < ya || cy > yb) return
+        new Set(ANIM.flatMap(p => (l.keys[p] || []).map(k => +k.t.toFixed(3)))).forEach(tt => { const cx = LABEL + tt * PPS; if (cx >= xa && cx <= xb) out.push(kid(l.id, tt)) })
+      })
+      setSelKeys(out); setBox(null)
+      window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up)
+  }
+  const scrub = e => {
+    if (e.shiftKey) return marquee(e)
+    setSelKeys([])
+    const mv = ev => setTime(Math.max(0, Math.min(R.current.duration, timeAt(ev))))
+    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up) }
+    if (playing) setPlaying(false)
+    mv(e); window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up)
+  }
+  const moveKeys = (id, a, b) => upd(id, l => ({ ...l, keys: Object.fromEntries(Object.entries(l.keys).map(([p, arr]) =>
+    [p, arr.map(k => (Math.abs(k.t - a) < 2e-3 ? { ...k, t: b } : k)).sort((x, y) => x.t - y.t)])) }))
+  const startKeyDrag = (e, id, t0) => {
+    e.stopPropagation(); setSel(id)
+    const k0 = kid(id, t0)
+    let ks = selKeys
+    if (e.shiftKey) { ks = ks.includes(k0) ? ks.filter(x => x !== k0) : [...ks, k0]; setSelKeys(ks); return }
+    if (!ks.includes(k0)) { ks = [k0]; setSelKeys(ks) }
+    const base = R.current.layers, x0 = e.clientX, minT = Math.min(...ks.map(k => +k.split('@')[1]))
+    let dt = 0
+    const mv = ev => {
+      dt = Math.max(-minT, Math.round(((ev.clientX - x0) / PPS) * 30) / 30)
+      setLayers(base.map(l => ({ ...l, keys: Object.fromEntries(Object.entries(l.keys).map(([p, a]) => [p, a.map(k => (ks.includes(kid(l.id, k.t)) ? { ...k, t: k.t + dt } : k)).sort((x, y) => x.t - y.t)])) })))
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up)
+      setSelKeys(ks.map(k => { const [i, tt] = k.split('@'); return kid(i, +tt + dt) }))
+    }
+    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up)
+  }
+  const copyKeys = () => {
+    const ks = R.current.selKeys.map(k => { const [i, tt] = k.split('@'); return [i, +tt] }), t0 = Math.min(...ks.map(k => k[1])), out = []
+    ks.forEach(([id, tt]) => { const l = R.current.layers.find(x => x.id === id); if (l) Object.entries(l.keys).forEach(([p, a]) => a.forEach(k => { if (Math.abs(k.t - tt) < 2e-3) out.push({ id, p, rel: k.t - t0, v: k.v, ease: k.ease }) })) })
+    clip.current = out
+  }
+  const pasteKeys = () => {
+    const c = clip.current, T = R.current.time
+    if (!c.length) return
+    const ids = [...new Set(c.map(x => x.id))], tgt = ids.length === 1 && R.current.sel ? R.current.sel : null
+    const items = c.map(x => ({ ...x, id: tgt || x.id }))
+    setLayers(ls => ls.map(l => { const mine = items.filter(x => x.id === l.id); if (!mine.length) return l; const keys = { ...l.keys }; mine.forEach(x => { keys[x.p] = putKey(keys[x.p], T + x.rel, x.v, x.ease) }); return { ...l, keys } }))
+    setSelKeys([...new Set(items.map(x => kid(x.id, T + x.rel)))])
+  }
+  const delSelKeys = () => {
+    const ks = R.current.selKeys
+    setLayers(ls => ls.map(l => ({ ...l, keys: Object.fromEntries(Object.entries(l.keys).map(([p, a]) => [p, a.filter(k => !ks.includes(kid(l.id, k.t)))])) })))
+    setSelKeys([])
+  }
+  const applyEase = en => setLayers(ls => ls.map(l => ({ ...l, keys: Object.fromEntries(Object.entries(l.keys).map(([p, a]) => [p, a.map(k => (R.current.selKeys.includes(kid(l.id, k.t)) ? { ...k, ease: en } : k))])) })))
+  const delKeys = (id, t) => upd(id, l => ({ ...l, keys: Object.fromEntries(Object.entries(l.keys).map(([p, a]) => [p, a.filter(k => Math.abs(k.t - t) > 2e-3)])) }))
+
+  /* Script */
+  const run = () => {
+    try {
+      const r = runScript(code, layers, duration)
+      setLayers(r.layers); setSubs(r.subs); setTrans(r.trans)
+      const ev = r.sfx.map(e => ({ ...e, id: 'S' + uid++ })) // เอฟเฟกต์จากสคริปต์สร้างใหม่ทุกครั้งที่ Run · ที่เพิ่มด้วยมือยังอยู่
+      setSfxs(s => [...s.filter(x => !x.gen), ...ev])
+      if (r.sounds.length) setAudios(a => a.map(x => { const c = r.sounds.find(q => x.name.toLowerCase().includes(String(q.name).toLowerCase())); return c ? { ...x, start: c.at, vol: c.volume ?? 1, fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0, loop: !!c.loop } : x }));
+      setDuration(r.duration); setErr(''); setTime(0)
+    } catch (e) { setErr(String(e.message || e)) }
+  }
+
+  /* Inspector */
+  const fields = cur ? (cur.type === 'character' ? ANIM : ANIM.filter(p => p !== 'mouth')) : []
+  const LBL = { x: 'Position X', y: 'Position Y', scale: 'Scale', rotation: 'Rotation', opacity: 'Opacity', mouth: 'Mouth' }
+  const toggleKey = p => upd(cur.id, l => hasKey(l, p, time)
+    ? { ...l, keys: { ...l.keys, [p]: l.keys[p].filter(k => Math.abs(k.t - time) >= 0.02) } }
+    : { ...l, keys: { ...l.keys, [p]: putKey(l.keys[p], time, val(l, p, time), ease) } })
+  const keyAll = () => upd(cur.id, l => ({ ...l, keys: { ...l.keys, ...Object.fromEntries(fields.map(p => [p, putKey(l.keys[p], time, val(l, p, time), ease)])) } }))
+
+  return (
+    <div className="h-screen flex flex-col bg-zinc-950 text-zinc-200 text-sm select-none">
+      {/* Top toolbar */}
+      <div className="h-12 shrink-0 flex items-center gap-2 px-3 bg-zinc-900 border-b border-zinc-800">
+        <button className={`${B} w-16 !bg-sky-600 hover:!bg-sky-500`} onClick={togglePlay} disabled={exporting || fastBusy}>{playing ? '❚❚ Pause' : '▶ Play'}</button>
+        <button className={B} onClick={() => { setPlaying(false); setTime(0) }} disabled={exporting}>■ Stop</button>
+        <div className="font-mono text-base bg-zinc-950 rounded px-3 py-1 text-amber-300">{fmt(time)} <span className="text-zinc-500">/ {fmt(duration)}</span></div>
+        <label className="text-xs text-zinc-400 flex items-center gap-1">ความยาว
+          <input type="number" min="1" className={`${IN} !w-16`} value={duration} onChange={e => setDuration(Math.max(1, +e.target.value || 1))} /> วิ</label>
+        <div className="w-px h-6 bg-zinc-700 mx-1" />
+        <button className={B} onClick={() => add(mk('text', nameOf('Text'), { y: 600 }))}>+ ข้อความ</button>
+        <button className={B} onClick={() => fileRef.current.click()}>+ รูปภาพ</button>
+        <div className="relative">
+          <button className={B} onClick={() => setCharMenu(m => !m)}>+ ตัวละคร 2D ▾</button>
+          {charMenu && <>
+            <div className="fixed inset-0 z-40" onClick={() => setCharMenu(false)} />
+            <div className="absolute left-0 top-8 z-50 w-64 bg-zinc-900 border border-zinc-700 rounded shadow-2xl p-1 text-xs">
+              {CHARS.map(([k, n, d, g]) => (
+                <div key={k}>
+                  {g && <div className="px-2 pt-2 pb-1 text-[11px] text-sky-400 font-semibold">{g}</div>}
+                  <button className="w-full text-left px-2 py-1.5 rounded hover:bg-zinc-800" onClick={() => addChar(k)}>
+                    <div>{n}</div><div className="text-[11px] text-zinc-500">{d}</div></button>
+                </div>
+              ))}
+            </div>
+          </>}
+        </div>
+        <button className={B} onClick={() => add(mk('group', nameOf('Group'), { y: H / 2 }))}>+ กลุ่ม</button>
+        <button className={`${B} ${tool === 'bone' ? '!bg-amber-600' : ''}`} onClick={() => setTool(t => (t === 'bone' ? 'select' : 'bone'))}>🦴 สร้างกระดูก</button>
+        <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={showBones} onChange={e => setShowBones(e.target.checked)} />แสดงกระดูก</label>
+        <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={keepBones} onChange={e => setKeepBones(e.target.checked)} />รวมใน Export</label>
+        <input ref={fileRef} type="file" accept="image/*" hidden onChange={addImage} />
+        <input ref={audioIn} type="file" accept="audio/*" hidden onChange={addAudio} />
+        <input ref={projIn} type="file" accept=".json,application/json" hidden onChange={openProject} />
+        <input ref={bgFile} type="file" accept="image/*" hidden onChange={e => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; const im = new Image(); im.onload = () => { bgImg.current = im; setVer(v => v + 1) }; im.src = URL.createObjectURL(f) }} />
+        <div className="flex-1" />
+        <button className={B} title="Undo (Ctrl+Z)" onClick={undo}>↶</button>
+        <button className={B} title="Redo (Ctrl+Y)" onClick={redo}>↷</button>
+        <button className={B} title="บันทึกโปรเจกต์ (.json)" onClick={saveProject}>💾</button>
+        <button className={B} title="เปิดโปรเจกต์ (.json)" onClick={() => projIn.current.click()}>📂</button>
+        <button className={B} onClick={() => setSel(null)}>⚙ ฉาก/Export</button>
+        <button className={`${B} ${armed ? '!bg-red-600 text-white' : '!text-red-400'}`} onClick={clearAll}>{armed ? '⚠ กดอีกครั้งเพื่อยืนยัน' : '🗑 Clear All'}</button>
+        <select className={`${IN} !w-20`} value={fast ? 'mp4' : fmtOut} disabled={fast} title={fast ? 'โหมด Export เร็ว ออกเป็น .mp4' : ''} onChange={e => setFmtOut(e.target.value)}><option value="webm">.webm</option><option value="mp4">.mp4</option></select>
+        <button className={`${B} !bg-emerald-600 hover:!bg-emerald-500`} onClick={fast ? exportFast : doExport} disabled={exporting || fastBusy || !!ttsBusy}>{fastBusy ? `⚡ เรนเดอร์ ${Math.round(expProg * 100)}%` : exporting ? '● กำลังบันทึก…' : ttsBusy ? `🎙 สร้างเสียง ${ttsBusy}` : fast ? '⚡ Export' : '⬇ Export'}</button>
+        {fastBusy && <button className={`${B} !text-red-400`} onClick={() => { cancelExp.current = true }}>✕ ยกเลิก</button>}
+      </div>
+
+      <div className="flex flex-1 min-h-0">
+        {/* Left: layers */}
+        <div className="w-56 shrink-0 bg-zinc-900 border-r border-zinc-800 overflow-auto" onDragOver={e => e.preventDefault()}
+          onDrop={() => { if (drag.current?.lid) reparent(drag.current.lid, null) }}>
+          <div className="px-3 py-2 text-xs text-zinc-400 border-b border-zinc-800">เลเยอร์ · ลากวางทับกันเพื่อจัดกลุ่ม</div>
+          {flat.map(({ l, d }) => (
+            <div key={l.id} draggable onDragStart={() => { drag.current = { lid: l.id } }} onDragOver={e => e.preventDefault()}
+              onDrop={e => { e.stopPropagation(); if (drag.current?.lid) reparent(drag.current.lid, l.id) }}
+              onClick={() => setSel(l.id)} onDoubleClick={() => { const n = prompt('ชื่อเลเยอร์', l.name); if (n) patch(l.id, { name: n }) }}
+              className={`flex items-center gap-1.5 py-1.5 pr-2 text-xs cursor-pointer border-b border-zinc-800 ${sel === l.id ? 'bg-sky-900/50' : 'hover:bg-zinc-800'}`}
+              style={{ paddingLeft: 8 + d * 16 }}>
+              <span className="w-4 text-center text-zinc-400">{ICON[l.type]}</span>
+              <span className="flex-1 truncate">{l.name}</span>
+              <button title="ล็อก" onClick={e => { e.stopPropagation(); patch(l.id, { locked: !l.locked }) }}>{l.locked ? '🔒' : '🔓'}</button>
+              <button title="แสดง/ซ่อน" onClick={e => { e.stopPropagation(); patch(l.id, { visible: !l.visible }) }}>{l.visible ? '👁' : '🚫'}</button>
+            </div>
+          ))}
+        </div>
+
+        {/* Center: viewport */}
+        <div className="flex-1 min-w-0 relative bg-zinc-950">
+          <div className="absolute inset-3 flex items-center justify-center">
+            <canvas ref={cv} width={W} height={H} style={{ maxWidth: '100%', maxHeight: '100%', cursor: tool === 'bone' ? 'crosshair' : 'default' }} className="shadow-2xl ring-1 ring-zinc-700 touch-none"
+              onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} />
+          </div>
+        </div>
+
+        {/* Right: inspector */}
+        <div className="w-64 shrink-0 bg-zinc-900 border-l border-zinc-800 overflow-auto p-3 space-y-2">
+          {!cur ? (
+            <div className="space-y-2 text-xs">
+              <div className="font-semibold text-sm">ฉาก / Export</div>
+              <label className="block text-zinc-400">ขนาดจอ
+                <select className={IN} value={`${size.w}x${size.h}`} onChange={e => { const [w, h] = e.target.value.split('x').map(Number); setSize({ w, h }) }}>
+                  {PRESETS.map(([n, w, h]) => <option key={n} value={`${w}x${h}`}>{n} ({w}×{h})</option>)}</select></label>
+              <div className="flex items-center gap-2">สีพื้นหลัง <input type="color" value={bg} onChange={e => setBg(e.target.value)} className="w-9 h-7 bg-transparent" />
+                <button className={B} onClick={() => bgFile.current.click()}>รูปพื้นหลัง</button>
+                <button className={B} onClick={() => { bgImg.current = null; setVer(v => v + 1) }}>ล้าง</button></div>
+              <label className="block text-zinc-400">สไตล์ซับไตเติล
+                <select className={IN} value={subStyle} onChange={e => setSubStyle(e.target.value)}>
+                  {[['box', 'กล่องดำ'], ['outline', 'ขาว+ขอบดำ'], ['tiktok', 'เหลืองสไตล์ TikTok'], ['neon', 'นีออน']].map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select></label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={snap} onChange={e => setSnap(e.target.checked)} />Snap + Grid
+                <input type="number" className={`${IN} !w-16`} value={grid} onChange={e => setGrid(Math.max(5, +e.target.value || 50))} />px</label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={tts} onChange={e => setTts(e.target.checked)} />TTS อ่านซับไตเติลตอนเล่น (Web Speech ฟรี · พรีวิวเท่านั้น ไม่ถูกอัดลงวิดีโอ)</label>
+              <select className={IN} value={ttsOpt.voice} onChange={e => setTtsOpt(v => ({ ...v, voice: e.target.value }))}>
+                <option value="">อัตโนมัติ (Google ภาษาไทย ถ้ามี)</option>
+                {[...voices].sort((a, b) => (Number(/^th/i.test(b.lang)) - Number(/^th/i.test(a.lang))) || (Number(/google/i.test(b.name)) - Number(/google/i.test(a.name)))).map(v => <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>)}</select>
+              <div className="flex items-center gap-1 text-zinc-400">
+                <span>เร็ว</span><input type="range" min="0.5" max="2" step="0.1" title="ความเร็ว" className="flex-1" value={ttsOpt.rate} onChange={e => setTtsOpt(v => ({ ...v, rate: +e.target.value }))} />
+                <span>ทุ้ม</span><input type="range" min="0" max="2" step="0.1" title="ระดับเสียง (Pitch)" className="flex-1" value={ttsOpt.pitch} onChange={e => setTtsOpt(v => ({ ...v, pitch: +e.target.value }))} />
+                <span>ดัง</span><input type="range" min="0" max="1" step="0.1" title="ความดัง" className="flex-1" value={ttsOpt.vol} onChange={e => setTtsOpt(v => ({ ...v, vol: +e.target.value }))} />
+                <button className={B} onClick={() => { try { speechSynthesis.cancel() } catch (e) {} speakSub({ text: 'สวัสดีครับ ทดสอบเสียงพูด' }) }}>▶ ลอง</button></div>
+              {voices.length > 0 && !googleTh(voices) && <div className="text-amber-400">ไม่พบเสียงภาษาไทยในอุปกรณ์นี้ (Chrome บนคอมมักไม่มีเสียง Google ไทย · บน Android ติดตั้ง Google Text-to-speech + ข้อมูลเสียงไทย)</div>}
+              <div className="flex gap-2">
+                <select className={IN} value={fps} onChange={e => setFps(+e.target.value)}>{[24, 30, 60].map(f => <option key={f} value={f}>{f} FPS</option>)}</select>
+                <select className={IN} value={expScale} onChange={e => setExpScale(e.target.value === '4k' ? '4k' : +e.target.value)}>{[[1, '100%'], [2, '200%'], ['4k', '4K (ด้านยาว 3840px)'], [0.75, '75%'], [0.5, '50%']].map(([v, n]) => <option key={v} value={v}>ขนาด {n}</option>)}</select></div>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={fastExp} disabled={!fastOK} onChange={e => setFastExp(e.target.checked)} />⚡ Export เร็ว (ไม่ต้องรอเล่นจนจบ · .mp4 · คมชัดเต็มความละเอียด/4K)</label>
+              {!fastOK && <div className="text-amber-400">เบราว์เซอร์นี้ไม่รองรับ Export เร็ว (ต้องใช้ Chrome / Edge ล่าสุด และโหลดไลบรารี mp4-muxer ได้) — ใช้โหมดบันทึกตามเวลาจริงแทน ซึ่ง 4K จะไม่คมเท่า</div>}
+              {fast && <div className="text-zinc-500">เรนเดอร์ได้ในแท็บพื้นหลัง แต่ต้องเปิดหน้านี้ค้างไว้จนเสร็จ · เสียงที่ใส่ในวิดีโอ = ไฟล์เสียง + เสียง TTS จาก API + SFX (Web Speech อัดลงไฟล์ไม่ได้)</div>}
+              <div className="pt-1 font-semibold">เสียง <button className={`${B} ml-1`} onClick={() => audioIn.current.click()}>+ ไฟล์เสียง</button>{audios.some(x => x.tts) && <button className={`${B} ml-1`} title="ดาวน์โหลดเสียง TTS ที่สร้างไว้ทุกไฟล์" onClick={dlAll}>⬇ เสียง TTS ทั้งหมด</button>}</div>
+              {audios.map(a => (
+                <div key={a.id} className="flex items-center gap-1"><span className="flex-1 truncate">🔊 {a.name}</span>
+                  <input type="number" step="0.1" title="เวลาเริ่ม (วินาที)" className={`${IN} !w-14`} value={a.start} onChange={e => setAudios(x => x.map(y => (y.id === a.id ? { ...y, start: +e.target.value || 0 } : y)))} />
+                  <input type="number" step="0.1" min="0" max="2" title="ระดับเสียง" className={`${IN} !w-12`} value={a.vol ?? 1} onChange={e => setAudios(x => x.map(y => (y.id === a.id ? { ...y, vol: +e.target.value } : y)))} />
+                  <button className={`${B} ${a.loop ? '!bg-sky-700' : ''}`} title="วนซ้ำ" onClick={() => setAudios(x => x.map(y => (y.id === a.id ? { ...y, loop: !y.loop } : y)))}>🔁</button>
+                  <button className={B} title="ดาวน์โหลดไฟล์เสียง" onClick={() => dlAudio(a)}>⬇</button>
+                  <button className={B} onClick={() => lipSync(a)}>Lip-sync</button>
+                  <button className={B} onClick={() => setAudios(x => x.filter(y => y.id !== a.id))}>✕</button></div>
+              ))}
+              <div className="pt-1 font-semibold">Sound Effect (Web Audio)</div>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={autoSfx} onChange={e => setAutoSfx(e.target.checked)} />เสียงอัตโนมัติ (transition / shake / textAnim)</label>
+              <div className="flex items-center gap-2 text-zinc-400">ความดังรวม <input type="range" min="0" max="1.5" step="0.05" className="flex-1" value={sfxVol} onChange={e => setSfxVol(+e.target.value)} /></div>
+              <div className="flex gap-1">
+                <select className={IN} value={sfxPick} onChange={e => setSfxPick(e.target.value)}>{SFX_LIST.map(([k, n]) => <option key={k} value={k}>{n} ({k})</option>)}</select>
+                <button className={B} title="ฟังตัวอย่าง" onClick={() => previewSfx(sfxPick)}>▶</button>
+                <button className={`${B} whitespace-nowrap`} onClick={() => setSfxs(x => [...x, { id: 'S' + uid++, name: sfxPick, at: Math.round(time * 100) / 100, vol: 1 }])}>+ ที่เวลานี้</button></div>
+              {[...sfxs].sort((a, b) => a.at - b.at).map(e => (
+                <div key={e.id} className={`flex items-center gap-1 ${e.auto && !autoSfx ? 'opacity-40' : ''}`}>
+                  <input type="number" step="0.1" min="0" title="เวลา (วินาที)" className={`${IN} !w-14`} value={e.at} onChange={ev => updSfx(e.id, { at: Math.max(0, +ev.target.value || 0) })} />
+                  <select className={`${IN} flex-1`} value={e.name} onChange={ev => updSfx(e.id, { name: ev.target.value })}>{SFX_LIST.map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select>
+                  {e.rep > 1 && <span className="text-zinc-500">×{e.rep}</span>}
+                  <input type="number" step="0.1" min="0" max="2" title="ระดับเสียง" className={`${IN} !w-12`} value={e.vol ?? 1} onChange={ev => updSfx(e.id, { vol: +ev.target.value })} />
+                  <button className={B} onClick={() => previewSfx(e.name)}>▶</button>
+                  <button className={B} onClick={() => setSfxs(x => x.filter(y => y.id !== e.id))}>✕</button></div>
+              ))}
+              <div className="pt-1 font-semibold">เสียงพูด AI (TTS API)</div>
+              <select className={IN} value={ttsApi.provider} onChange={e => { const p = e.target.value, ps = TTS_PRESET[p]; setTtsApi(v => ({ ...v, provider: p, ...ps, url: ps.url ?? v.url, voice: p === 'vajax' ? vxRefs[0]?.id || '' : ps.voice })) }}>
+                <option value="openai">OpenAI / เข้ากันได้กับ OpenAI</option><option value="openrouter">OpenRouter (TTS หลายโมเดล)</option><option value="edge">Edge TTS (ฟรี · เสียงไทย · ต้อง deploy บน Vercel)</option><option value="heygen">HeyGen (มีเสียงไทย)</option><option value="eleven">ElevenLabs</option><option value="vajax">VAJAX-TTS (AIForThai · โคลนเสียงไทย)</option></select>
+              {ttsApi.provider !== 'eleven' && <input className={IN} placeholder="Endpoint URL" value={ttsApi.url} onChange={e => setTtsApi(v => ({ ...v, url: e.target.value }))} />}
+              <input type="password" className={IN} placeholder="API key" value={ttsApi.key} onChange={e => setTtsApi(v => ({ ...v, key: e.target.value }))} />
+              {ttsApi.provider === 'openrouter' && <>
+                <button className={`${B} w-full`} disabled={!!ttsBusy} onClick={loadOrModels}>โหลดรายชื่อโมเดลเสียงที่ใช้ได้</button>
+                {orModels.length > 0 && <>
+                  <select className={IN} value={ttsApi.model} onChange={e => { const m = orModels.find(x => x.id === e.target.value); setTtsApi(v => ({ ...v, model: e.target.value, voice: m?.voices[0] || '' })) }}><option value="">— เลือกโมเดล —</option>{orModels.map(m => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}</select>
+                  {(orModels.find(x => x.id === ttsApi.model)?.voices.length || 0) > 0 && <select className={IN} value={ttsApi.voice} onChange={e => setTtsApi(v => ({ ...v, voice: e.target.value }))}>{orModels.find(x => x.id === ttsApi.model).voices.map(x => <option key={x} value={x}>{x}</option>)}</select>}
+                </>}
+                <label className="flex items-center gap-2 text-zinc-400" title="ใช้เมื่อโมเดลส่งเสียง PCM ดิบ (เช่น HeyGen) แล้วเสียงเพี้ยนสูง/ต่ำ — เว้นว่างให้ตรวจอัตโนมัติ">PCM Hz<input type="number" className={`${IN} !w-24`} placeholder="อัตโนมัติ" value={ttsApi.pcmRate ?? ''} onChange={e => setTtsApi(v => ({ ...v, pcmRate: e.target.value }))} /><span className="text-zinc-500">(ถ้าเสียงเพี้ยนลอง 24000 / 44100)</span></label>
+                <div className="text-zinc-500">ชื่อเสียงต้องเป็นของโมเดลนั้น (เช่น alloy ใช้ได้เฉพาะโมเดล OpenAI) · คิดค่าบริการตามจำนวนตัวอักษร · เสียงไทยขึ้นกับโมเดล ลองฟังก่อน</div>
+              </>}
+              {ttsApi.provider === 'edge' && <>
+                <select className={IN} value={ttsApi.voice} onChange={e => setTtsApi(v => ({ ...v, voice: e.target.value }))}><option value="th-TH-PremwadeeNeural">Premwadee (หญิง · ไทย)</option><option value="th-TH-NiwatNeural">Niwat (ชาย · ไทย)</option></select>
+                <input type="password" className={IN} placeholder="รหัสเข้าใช้ (เฉพาะกรณีตั้ง ACCESS_CODE ที่เซิร์ฟเวอร์)" value={ttsApi.key} onChange={e => setTtsApi(v => ({ ...v, key: e.target.value }))} />
+                <div className="text-zinc-500">ต้อง deploy บน Vercel พร้อมโฟลเดอร์ api (ใช้ /api/edge) — GitHub Pages / เปิดไฟล์จากเครื่องใช้ไม่ได้ เพราะ Microsoft ปฏิเสธการเรียกจากเบราว์เซอร์ (403) · ถ้าเปิดไฟล์จากเครื่อง ให้ใส่ Endpoint เป็น https://ชื่อแอป.vercel.app/api/edge · เป็นบริการไม่เป็นทางการ อาจใช้ไม่ได้ในอนาคต</div>
+              </>}
+              {ttsApi.provider === 'heygen' && <>
+                <div className="flex items-center gap-2"><button className={B} disabled={!!ttsBusy} onClick={loadHgVoices}>โหลดรายชื่อเสียง (เน้นไทย)</button>
+                  <label className="flex items-center gap-2 text-zinc-400">ความเร็ว<input type="number" min="0.5" max="2" step="0.1" className={`${IN} !w-16`} value={ttsApi.hgSpeed ?? 1} onChange={e => setTtsApi(v => ({ ...v, hgSpeed: e.target.value }))} /></label></div>
+                {hgVoices.length > 0 && <div className="flex items-center gap-1">
+                  <select className={IN} value={ttsApi.voice} onChange={e => setTtsApi(v => ({ ...v, voice: e.target.value }))}><option value="">— เลือกเสียง —</option>{hgVoices.map(v => <option key={v.voice_id} value={v.voice_id}>{v.name} ({v.language || '?'}{v.gender ? ' · ' + v.gender : ''})</option>)}</select>
+                  <button className={B} title="ฟังตัวอย่างเสียง" onClick={() => { const u = hgVoices.find(v => v.voice_id === ttsApi.voice)?.preview_audio_url; if (u) try { new Audio(u).play() } catch (e) {} }}>▶</button></div>}
+                <input className={IN} placeholder="Voice ID (HeyGen)" value={ttsApi.voice} onChange={e => setTtsApi(v => ({ ...v, voice: e.target.value }))} />
+              </>}
+              {ttsApi.provider === 'vajax' ? <>
+                <div className="flex items-center gap-2"><button className={B} onClick={() => vxIn.current.click()}>+ เสียงอ้างอิง</button><span className="text-zinc-500">ไฟล์เสียงอะไรก็ได้ — แปลงเป็น WAV ให้อัตโนมัติ (แนะนำ 5–12 วินาที)</span>
+                  <input ref={vxIn} type="file" accept="audio/*" hidden onChange={addRef} /></div>
+                {vxRefs.map(r => (
+                  <div key={r.id} className="space-y-1 bg-zinc-900/60 rounded p-1.5">
+                    <div className="flex items-center gap-1">
+                      <input className={IN} title="ชื่อเสียง — ใช้ใน speak('...', 3, 'Mouth', 'ชื่อเสียง')" value={r.name} onChange={e => updRef(r.id, { name: e.target.value.trim() || r.name })} />
+                      <span className="text-zinc-500 whitespace-nowrap">{r.dur.toFixed(1)}s</span>
+                      <button className={B} title="ฟังเสียงอ้างอิง" onClick={() => { try { new Audio('data:audio/wav;base64,' + r.b64).play() } catch (e) {} }}>▶</button>
+                      <button className={B} onClick={() => { setVxRefs(x => x.filter(y => y.id !== r.id)); if (ttsApi.voice === r.id) setTtsApi(v => ({ ...v, voice: '' })) }}>✕</button></div>
+                    <textarea rows="2" className={IN} placeholder="ข้อความที่ตรงกับเสียงอ้างอิงนี้ (reference_text)" value={r.text} onChange={e => updRef(r.id, { text: e.target.value })} />
+                    {r.dur > 15 && <div className="text-amber-400">เสียงอ้างอิงยาวเกิน 15 วินาที — แนะนำตัดให้สั้นลง ผลลัพธ์จะเสถียรกว่า</div>}
+                  </div>
+                ))}
+                {vxRefs.length > 0 && <div className="flex items-center gap-2"><span className="text-zinc-400 whitespace-nowrap">เสียงเริ่มต้น</span>
+                  <select className={IN} value={ttsApi.voice} onChange={e => setTtsApi(v => ({ ...v, voice: e.target.value }))}>{vxRefs.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></div>}
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 items-center">
+                  <label className="flex items-center gap-2 text-zinc-400">ความเร็ว<input type="number" min="0.5" max="2" step="0.1" className={IN} value={ttsApi.vx?.speed ?? 1} onChange={e => setTtsApi(v => ({ ...v, vx: { ...v.vx, speed: e.target.value } }))} /></label>
+                  <label className="flex items-center gap-2 text-zinc-400" title="คุณภาพเสียง 16–64 (สูง = ช้าแต่ชัด)">NFE<input type="number" min="16" max="64" step="4" className={IN} value={ttsApi.vx?.nfe ?? 32} onChange={e => setTtsApi(v => ({ ...v, vx: { ...v.vx, nfe: e.target.value } }))} /></label>
+                  <label className="flex items-center gap-2 text-zinc-400" title="0–65535 · เว้นว่าง = สุ่ม · ใส่ค่าเดิมเพื่อให้ได้เสียงเหมือนเดิม">Seed<input type="number" min="0" max="65535" className={IN} placeholder="สุ่ม" value={ttsApi.vx?.seed ?? ''} onChange={e => setTtsApi(v => ({ ...v, vx: { ...v.vx, seed: e.target.value } }))} /></label>
+                  <label className="flex items-center gap-2 text-zinc-400"><input type="checkbox" checked={!!ttsApi.vx?.phoneme} onChange={e => setTtsApi(v => ({ ...v, vx: { ...v.vx, phoneme: e.target.checked } }))} />ใช้ Phoneme</label></div>
+                <button className={`${B} w-full`} disabled={!!ttsBusy} onClick={testVx}>▶ ทดลองเสียง “สวัสดีครับ ทดสอบเสียงพูด”</button>
+              </> : ttsApi.provider === 'heygen' || ttsApi.provider === 'edge' ? null : <div className="flex gap-2">
+                <input className={IN} placeholder="Model" value={ttsApi.model} onChange={e => setTtsApi(v => ({ ...v, model: e.target.value }))} />
+                <input className={IN} placeholder={ttsApi.provider === 'eleven' ? 'Voice ID' : 'Voice'} value={ttsApi.voice} onChange={e => setTtsApi(v => ({ ...v, voice: e.target.value }))} /></div>}
+              <label className="flex items-center gap-2"><input type="checkbox" checked={ttsApi.autoExport !== false} onChange={e => setTtsApi(v => ({ ...v, autoExport: e.target.checked }))} />สร้างเสียงจาก API อัตโนมัติตอน Export (ถ้าซับ/ค่าเสียงเปลี่ยน)</label>
+              <button className={`${B} w-full`} disabled={!!ttsBusy} onClick={genTTS}>{ttsBusy ? `กำลังสร้างเสียง ${ttsBusy}…` : '🎙 สร้างเสียงจากซับไตเติล + Lip-sync'}</button>
+              <div className="text-zinc-500">คีย์เก็บในเบราว์เซอร์นี้เท่านั้น ไม่ถูกบันทึกลงไฟล์โปรเจกต์ · เสียงที่สร้างจะถูกอัดลงวิดีโอตอน Export · เมื่อมีเสียงจาก API แล้ว พรีวิว Web Speech จะหยุดอ่านซ้ำ (ลบเสียง tts_ ในรายการเสียงถ้าอยากกลับไปพรีวิวด้วย Web Speech)</div>
+              <div className="pt-1 font-semibold">แหล่งสื่อฟรี (ตรวจไลเซนส์ก่อนใช้)</div>
+              {MEDIA.map(([n, u]) => <a key={u} href={u} target="_blank" rel="noreferrer" className="block text-sky-400 hover:underline">{n}</a>)}
+              <div className="pt-1 text-zinc-500">คลิกวัตถุเพื่อแก้ไข · ปุ่มลัด: Space เล่น, K คีย์, Delete ลบ, ลูกศรขยับ (Shift = 10px), Ctrl+C/V คัดลอก/วางคีย์, Shift+ลากบนไทม์ไลน์ = เลือกหลายคีย์</div>
+            </div>
+          ) : <>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 font-semibold truncate">{cur.name}</div>
+              <button className={B} title="ทำสำเนา (Ctrl+D)" onClick={() => dup(cur.id)}>⧉ สำเนา</button>
+              <button className={`${B} !text-red-400`} onClick={() => remove(cur.id)}>ลบ</button>
+            </div>
+            {fields.map(p => (
+              <div key={p} className="flex items-center gap-2">
+                <span className="w-20 text-xs text-zinc-400">{LBL[p]}</span>
+                <input type="number" step={p === 'scale' || p === 'opacity' || p === 'mouth' ? 0.05 : 1} className={IN}
+                  value={Math.round(val(cur, p, time) * 100) / 100} onChange={e => upd(cur.id, l => setProp(l, p, parseFloat(e.target.value) || 0, time, ease))} />
+                <button title="เพิ่ม/ลบ Keyframe ที่เวลานี้" onClick={() => toggleKey(p)}
+                  className={`w-6 h-6 shrink-0 ${hasKey(cur, p, time) ? 'text-amber-400' : cur.keys[p]?.length ? 'text-amber-800' : 'text-zinc-600'} hover:text-amber-300`}>◆</button>
+              </div>
+            ))}
+            <div className="flex items-center gap-2"><span className="w-20 text-xs text-zinc-400">Pivot X / Y</span>
+              <input type="number" className={IN} value={cur.props.px || 0} onChange={e => setP('px', +e.target.value || 0)} />
+              <input type="number" className={IN} value={cur.props.py || 0} onChange={e => setP('py', +e.target.value || 0)} /></div>
+            {cur.type === 'bone' && (
+              <div className="flex items-center gap-2"><span className="w-20 text-xs text-zinc-400">Length</span>
+                <input type="number" className={IN} value={Math.round(cur.props.len)} onChange={e => upd(cur.id, l => ({ ...l, props: { ...l.props, len: Math.max(10, +e.target.value || 10) } }))} /></div>
+            )}
+            {cur.type === 'shape' && <input type="color" value={cur.props.color} onChange={e => upd(cur.id, l => ({ ...l, props: { ...l.props, color: e.target.value } }))} className="w-9 h-7 bg-transparent" />}
+            {cur.type === 'text' && <>
+              <div className="text-xs text-zinc-400 pt-1">Text Content</div>
+              <textarea className={IN} rows={2} value={cur.props.text} onChange={e => upd(cur.id, l => ({ ...l, props: { ...l.props, text: e.target.value } }))} />
+              <div className="flex gap-2 items-center">
+                <select className={IN} value={cur.props.anim || 'none'} onChange={e => setP('anim', e.target.value)}>{['none', 'typewriter', 'pop', 'slide', 'fade'].map(k => <option key={k} value={k}>{k}</option>)}</select>
+                <input type="number" step="0.1" title="เริ่มที่ (วินาที)" className={`${IN} !w-16`} value={cur.props.animAt || 0} onChange={e => setP('animAt', +e.target.value || 0)} />
+                <input type="number" step="0.1" title="ความยาว (วินาที)" className={`${IN} !w-16`} value={cur.props.animDur || 0.8} onChange={e => setP('animDur', +e.target.value || 0.8)} />
+              </div>
+              <div className="flex gap-2 items-center">
+                <input type="color" value={cur.props.color} onChange={e => upd(cur.id, l => ({ ...l, props: { ...l.props, color: e.target.value } }))} className="w-9 h-7 bg-transparent" />
+                <input type="number" className={IN} value={cur.props.size} onChange={e => upd(cur.id, l => ({ ...l, props: { ...l.props, size: +e.target.value || 10 } }))} />
+              </div>
+            </>}
+            <div className="flex flex-wrap gap-2 pt-2">
+              <select className={IN} value={ease} onChange={e => { setEase(e.target.value); if (selKeys.length) applyEase(e.target.value) }}>{Object.keys(EASE).map(k => <option key={k} value={k}>{k}</option>)}</select>
+              <EaseGraph k={ease} />
+              <button className={`${B} whitespace-nowrap`} onClick={keyAll}>◆ Keyframe ทั้งหมด</button>
+            </div>
+          </>}
+        </div>
+      </div>
+
+      {/* Bottom dock */}
+      <div className="h-64 shrink-0 flex border-t border-zinc-800">
+        <div className="w-1/2 overflow-auto bg-zinc-900 border-r border-zinc-800 relative">
+          <div ref={content} className="relative" style={{ width: LABEL + duration * PPS + 60, minHeight: '100%' }}>
+            <div className="sticky top-0 z-20 h-6 bg-zinc-950 border-b border-zinc-800 cursor-col-resize" onPointerDown={scrub}>
+              {Array.from({ length: Math.floor(duration) + 1 }, (_, i) => (
+                <div key={i} className="absolute top-0 h-full border-l border-zinc-700 pl-1 text-[10px] text-zinc-500" style={{ left: LABEL + i * PPS }}>{i}s</div>
+              ))}
+            </div>
+            <div onPointerDown={scrub}>
+              {flat.map(({ l, d }) => {
+                const times = [...new Set(ANIM.flatMap(p => (l.keys[p] || []).map(k => +k.t.toFixed(3))))]
+                return (
+                  <div key={l.id} onClick={() => setSel(l.id)} className={`flex h-7 border-b border-zinc-800 ${sel === l.id ? 'bg-sky-900/30' : ''}`}>
+                    <div className="sticky left-0 z-10 shrink-0 bg-zinc-900 border-r border-zinc-800 flex items-center truncate text-xs" style={{ width: LABEL, paddingLeft: 8 + d * 10 }}>{l.name}</div>
+                    <div className="relative flex-1">
+                      {times.map(t => (
+                        <div key={t} title="ลาก=ย้าย · ดับเบิลคลิก=ลบ" onPointerDown={e => startKeyDrag(e, l.id, t)} onDoubleClick={() => delKeys(l.id, t)}
+                          className={`absolute top-1/2 w-3 h-3 -mt-1.5 -ml-1.5 rotate-45 border cursor-ew-resize ${selKeys.includes(kid(l.id, t)) ? 'bg-white border-sky-400' : 'bg-amber-400 border-amber-700'}`} style={{ left: t * PPS }} />
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+              <div className="flex h-7 border-b border-zinc-800">
+                <div className="sticky left-0 z-10 shrink-0 bg-zinc-900 border-r border-zinc-800 flex items-center px-2 text-xs text-zinc-400" style={{ width: LABEL }}>ซับไตเติล</div>
+                <div className="relative flex-1">
+                  {subs.map((s, i) => (
+                    <div key={i} className="absolute top-1 h-5 rounded bg-violet-700/70 text-[10px] px-1 truncate" style={{ left: s.start * PPS, width: (s.end - s.start) * PPS }}>{s.text}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {box && <div className="absolute border border-sky-400 bg-sky-400/10 z-40 pointer-events-none" style={{ left: Math.min(box.x0, box.x1), top: Math.min(box.y0, box.y1), width: Math.abs(box.x1 - box.x0), height: Math.abs(box.y1 - box.y0) }} />}
+            <div className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none" style={{ left: LABEL + time * PPS }}>
+              <div className="absolute -top-0 -left-1.5 w-3 h-4 bg-red-500 rounded-b" />
+            </div>
+          </div>
+        </div>
+
+        <div className="w-1/2 flex flex-col bg-zinc-900">
+          <div className="h-8 shrink-0 flex items-center gap-2 px-2 border-b border-zinc-800">
+            <span className="text-xs text-zinc-400 flex-1">Script (JavaScript)</span>
+            <button className={`${B} !bg-sky-600 hover:!bg-sky-500`} onClick={run}>▶ Run Script</button>
+          </div>
+          <textarea spellCheck={false} value={code} onChange={e => setCode(e.target.value)}
+            className="flex-1 min-h-0 resize-none bg-zinc-950 p-2 font-mono text-xs text-emerald-200 outline-none select-text" />
+          {err && <div className="px-2 py-1 text-xs text-red-300 bg-red-950">⚠ {err}</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+</script>
+</body>
+</html>
